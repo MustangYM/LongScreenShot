@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>A native macOS menu bar screenshot tool with capture, annotation, OCR, pins, and long screenshots.</strong>
+  <strong>原生 macOS 菜单栏截图工具，支持截图、标注、OCR、图钉与长截图。</strong>
 </p>
 
 <p align="center">
@@ -22,19 +22,19 @@
 
 ---
 
-## Introduction
+## 介绍
 
-**LongScreenShot** is a native macOS menu bar screenshot tool built with **Swift**, **AppKit**, **Vision**, **ScreenCaptureKit**, and other system frameworks.
+**LongScreenShot** 是一款为 macOS 打造的原生菜单栏截图工具，基于 **Swift、AppKit、Vision、ScreenCaptureKit** 以及系统原生框架实现。
 
-It is designed for a lightweight and natural screenshot workflow on macOS. From the menu bar, you can quickly start normal captures, select windows, draw custom regions, annotate screenshots, apply mosaic effects, run OCR, pin images on screen, and create long screenshots.
+它希望把日常截图流程做得更轻、更顺手：从菜单栏快速启动，完成普通截图、窗口识别、自由框选、标注、马赛克、OCR、悬浮图钉和长截图等操作。
 
-LongScreenShot focuses on a simple native experience: fast to launch, easy to control, local-first, and careful about requesting unnecessary permissions.
+LongScreenShot 的重点不是堆功能，而是提供一个尽可能贴近 macOS 使用习惯的截图体验：轻量、直接、本地优先，并尽量减少不必要的权限请求。
 
-> LongScreenShot currently supports **macOS 14.0 and later**.
+> 当前支持 **macOS 14.0 及以上版本**。
 
 ---
 
-## Preview
+## 预览
 
 <p align="center">
   <img src="docs/images/preview-capture.png" width="760" alt="Screenshot Preview">
@@ -46,136 +46,135 @@ LongScreenShot focuses on a simple native experience: fast to launch, easy to co
 
 ---
 
-## Features
+## 核心特性
 
-### Capture and Selection
+### 截图与选区
 
-- Always available from the macOS menu bar
-- Global hotkey recording, with `⌘⇧2` as the default shortcut
-- Automatic window detection on hover
-- Click to capture a window, or drag to create a custom selection
-- Multi-display support, with capture based on the screen under the cursor
-- Global `Esc` support to cancel capture immediately
-- Move the selection after it is created
-- Resize the selection precisely with edge and corner handles
-- Floating toolbar that follows the current selection
+- 菜单栏常驻入口，随时快速启动
+- 支持录制全局快捷键，默认快捷键为 `⌘⇧2`
+- 鼠标悬停时自动识别应用窗口
+- 支持单击选择窗口，也支持拖拽自由框选
+- 支持多显示器，按鼠标所在屏幕独立截图
+- 截图过程中可随时按 `Esc` 全局退出
+- 选区创建后可继续移动位置
+- 支持通过四边与四角手柄精细调整选区大小
+- 工具栏会根据选区位置自动调整显示位置
 
-### Annotation Tools
+### 标注工具
 
-- Rectangle, ellipse, arrow, and text
-- Freehand brush
-- Mosaic, Gaussian blur, and pixelation
-- Undo and redo
-- `⌘Z` and `⌘⇧Z` shortcuts
-- Real-time adjustment for font size, stroke width, and brush color
-- Toolbar icons with instant hover hints
+- 矩形、圆形、箭头、文字
+- 自由画笔
+- 马赛克、高斯模糊、像素化
+- 撤销 / 重做
+- 支持 `⌘Z` 与 `⌘⇧Z`
+- 支持实时调整文字字号、线条粗细与画笔颜色
+- 工具栏图标带悬停说明，降低学习成本
 
-### OCR, Translation, and Pins
+### OCR、翻译与图钉
 
-- Local OCR powered by Apple Vision
-- OCR results can be displayed inside the app
-- Baidu and Google translation engines are supported
-- Translation results are shown in a side-by-side original / translated layout when available
-- If the web interface is unavailable, the app can open the corresponding translation page automatically
-- Screenshots can be pinned as floating image windows
-- OCR results can be attached as a child window next to a pinned image
-- Pins and OCR windows can be dragged across displays
-- Pins and OCR windows can be resized
-- Close all pins with one action
+- 使用 Apple Vision 进行本地 OCR 识别
+- OCR 结果可在 App 内展示
+- 支持选择百度或谷歌作为翻译引擎
+- 翻译结果优先在 App 内以原文 / 译文双栏形式展示
+- 当网页接口不可用时，可自动打开对应翻译网页
+- 截图可作为悬浮图钉固定在屏幕上
+- OCR 识别结果可作为附着子窗显示在图钉右侧
+- 图钉与 OCR 内容窗支持跨显示器拖动
+- 图钉与 OCR 内容窗支持缩放
+- 支持一键关闭全部图钉
 
-### Long Screenshots
+### 长截图
 
-LongScreenShot does not simply stitch a few static images together. Its long screenshot workflow is based on a continuous frame stream and displacement matching.
+LongScreenShot 的长截图不是简单拼接几张静态图片，而是基于连续帧流和位移匹配实现。
 
-- Continuous frame capture powered by ScreenCaptureKit
-- Manual scrolling by the user
-- No simulated mouse wheel events
-- No Accessibility / Control Your Computer permission required
-- NCC-based overlap matching between adjacent frames
-- Displacement tracking between raw frames
-- Real-time minimap preview for progress feedback
-- Bounded ordered queue to preserve intermediate frames during fast scrolling
-- Ability to rebuild the anchor from the next raw frame after matching failure
-- Seam selection tries to avoid text rows and prefers low-texture blank areas
-- Pending frames are drained before finishing to reduce missing content at the end
+- 基于 ScreenCaptureKit 获取连续画面帧
+- 用户手动滚动，不模拟鼠标滚轮
+- 不需要“辅助功能 / 控制电脑”权限
+- 使用 NCC 进行相邻帧重叠匹配
+- 跟踪相邻原始帧之间的位移
+- 提供实时 minimap 预览，方便观察当前拼接进度
+- 使用有界顺序队列保留快速滚动中的中间帧
+- 当匹配失效后，可从下一帧重新建立锚点
+- 接缝会尽量避开文字行，优先选择低纹理空白区域
+- 点击完成后会先排空待处理帧，尽量减少尾部内容丢失
 
-### Settings
+### 设置
 
-- Follow system language
-- Manually select common languages
-- Configure launch at login
-- Select translation engine
-- Built-in About view
+- 支持跟随系统语言
+- 支持手动选择常用语言
+- 支持配置开机启动
+- 支持选择翻译引擎
+- 内置关于信息
 
 ---
 
-## Privacy and Permissions
+## 隐私与权限
 
-LongScreenShot uses native macOS capabilities whenever possible and keeps processing local first.
+LongScreenShot 尽量使用 macOS 系统原生能力，并优先在本机完成处理。
 
-- OCR is performed locally with Apple Vision
-- Screenshot, annotation, pin, and long screenshot processing are handled on the device
-- Long screenshots are created through manual scrolling
-- The app does not simulate mouse movement or wheel events
-- The app does not request Accessibility / Control Your Computer permission
+- OCR 使用 Apple Vision 在本地识别
+- 截图、标注、图钉和长截图处理均在本机完成
+- 长截图由用户手动滚动
+- 不模拟鼠标或滚轮操作
+- 不申请“辅助功能 / 控制电脑”权限
 
-When using screenshot features for the first time, macOS will ask you to grant:
+首次使用截图能力时，macOS 会要求授予以下权限：
 
 ```text
-System Settings → Privacy & Security → Screen & System Audio Recording
+系统设置 → 隐私与安全性 → 屏幕与系统音频录制
 ```
 
-This is a system-level permission required by macOS for screen capture, screen recording, and ScreenCaptureKit.
+这是 macOS 对截图、录屏和 ScreenCaptureKit 的系统级权限要求。
 
 ---
 
-## Run from Source
+## 从源码运行
 
-1. Clone the repository:
+1. 克隆仓库：
 
 ```bash
 git clone https://github.com/MustangYM/LongScreenShot.git
 cd LongScreenShot
 ```
 
-2. Open the `.xcodeproj` or `.xcworkspace` file in Xcode.
-3. Select the macOS app target for LongScreenShot.
-4. Click Run.
-5. When prompted, grant the Screen & System Audio Recording permission.
+2. 使用 Xcode 打开项目中的 `.xcodeproj` 或 `.xcworkspace` 文件。
+3. 选择 LongScreenShot 对应的 macOS App Target。
+4. 点击 Run 运行。
+5. 首次截图时，根据系统提示授予“屏幕与系统音频录制”权限。
 
-If screen capture still does not work after granting permission, quit the app completely and launch it again.
+如果授权后仍无法截图，可以尝试完全退出 App 后重新启动。
 
 ---
 
-## Usage
+## 使用说明
 
-After launch, LongScreenShot lives in the macOS menu bar.
+启动 App 后，LongScreenShot 会常驻在 macOS 菜单栏中。
 
-You can use the menu bar icon to start screenshot capture, create long screenshots, open settings, close pins, and access other actions. You can also use the recorded global hotkey to start capture quickly.
+你可以通过菜单栏图标进入截图、长截图、设置、关闭图钉等功能，也可以使用已录制的全局快捷键快速启动截图。
 
-Default shortcut:
+默认快捷键：
 
 ```text
 ⌘⇧2
 ```
 
-If this shortcut conflicts with another app, you can record a different one in Settings.
+如果该快捷键与其他 App 冲突，可以在设置中重新录制。
 
 ---
 
-## Use Cases
+## 适用场景
 
-- Daily screenshots and quick annotation
-- Capturing long web pages, documents, or chat records
-- Pinning temporary images, text, codes, or references on screen
-- Extracting text from screenshots with local OCR
-- Quickly translating text recognized from screenshots
-- Organizing captures and pins across multiple displays
+- 日常截图与快速标注
+- 截取网页、文档、聊天记录中的长内容
+- 临时固定图片、文字、验证码或参考资料
+- 本地 OCR 识别截图中的文字
+- 对截图文字进行快速翻译
+- 在多显示器环境下进行截图与图钉整理
 
 ---
 
-## Notes
+## 说明
 
-LongScreenShot is still being improved. Long screenshot quality may be affected by page content, scroll speed, animations, transparent layers, video regions, and repeated textures.
+LongScreenShot 仍在持续完善中。长截图效果会受到页面内容、滚动速度、动画、透明层、视频区域以及重复纹理等因素影响。
 
-If stitching is inaccurate, try scrolling more slowly or avoiding areas with heavy dynamic content.
+如果遇到拼接不准确的情况，可以尝试降低滚动速度，或避开包含大量动态内容的区域。
