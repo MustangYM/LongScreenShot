@@ -1,0 +1,282 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000101 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000201 /* main.swift */; };
+		A00000000000000000000102 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000202 /* AppDelegate.swift */; };
+		A00000000000000000000103 /* GlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000203 /* GlobalHotKey.swift */; };
+		A00000000000000000000104 /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000204 /* SettingsWindowController.swift */; };
+		A00000000000000000000105 /* CaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000205 /* CaptureCoordinator.swift */; };
+		A00000000000000000000106 /* CaptureToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000206 /* CaptureToolbarView.swift */; };
+		A00000000000000000000107 /* OverlayWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000207 /* OverlayWindowController.swift */; };
+		A00000000000000000000108 /* Annotations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000208 /* Annotations.swift */; };
+		A00000000000000000000109 /* ImageServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000209 /* ImageServices.swift */; };
+		A0000000000000000000010A /* LongCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000020A /* LongCaptureService.swift */; };
+		A0000000000000000000010B /* PinWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000020B /* PinWindowController.swift */; };
+		A0000000000000000000010C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000020F /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		189A57662FFCE0370084A444 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A00000000000000000000201 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A00000000000000000000202 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		A00000000000000000000203 /* GlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKey.swift; sourceTree = "<group>"; };
+		A00000000000000000000204 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
+		A00000000000000000000205 /* CaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureCoordinator.swift; sourceTree = "<group>"; };
+		A00000000000000000000206 /* CaptureToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureToolbarView.swift; sourceTree = "<group>"; };
+		A00000000000000000000207 /* OverlayWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayWindowController.swift; sourceTree = "<group>"; };
+		A00000000000000000000208 /* Annotations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Annotations.swift; sourceTree = "<group>"; };
+		A00000000000000000000209 /* ImageServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageServices.swift; sourceTree = "<group>"; };
+		A0000000000000000000020A /* LongCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongCaptureService.swift; sourceTree = "<group>"; };
+		A0000000000000000000020B /* PinWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinWindowController.swift; sourceTree = "<group>"; };
+		A0000000000000000000020C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A0000000000000000000020D /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		A0000000000000000000020E /* LongScreenShot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LongScreenShot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A0000000000000000000020F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00000000000000000000301 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000401 = {
+			isa = PBXGroup;
+			children = (
+				189A57662FFCE0370084A444 /* Assets.xcassets */,
+				A00000000000000000000402 /* Sources */,
+				A00000000000000000000403 /* Resources */,
+				A0000000000000000000020D /* README.md */,
+				A00000000000000000000404 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A00000000000000000000402 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000201 /* main.swift */,
+				A00000000000000000000202 /* AppDelegate.swift */,
+				A00000000000000000000203 /* GlobalHotKey.swift */,
+				A00000000000000000000204 /* SettingsWindowController.swift */,
+				A00000000000000000000205 /* CaptureCoordinator.swift */,
+				A00000000000000000000206 /* CaptureToolbarView.swift */,
+				A00000000000000000000207 /* OverlayWindowController.swift */,
+				A00000000000000000000208 /* Annotations.swift */,
+				A00000000000000000000209 /* ImageServices.swift */,
+				A0000000000000000000020A /* LongCaptureService.swift */,
+				A0000000000000000000020B /* PinWindowController.swift */,
+			);
+			name = Sources;
+			path = Sources/LongScreenShot;
+			sourceTree = SOURCE_ROOT;
+		};
+		A00000000000000000000403 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A0000000000000000000020C /* Info.plist */,
+				A0000000000000000000020F /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = SOURCE_ROOT;
+		};
+		A00000000000000000000404 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A0000000000000000000020E /* LongScreenShot.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000000000000000000501 /* LongScreenShot */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000802 /* Build configuration list for PBXNativeTarget "LongScreenShot" */;
+			buildPhases = (
+				A00000000000000000000601 /* Sources */,
+				A00000000000000000000301 /* Frameworks */,
+				A00000000000000000000602 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LongScreenShot;
+			productName = LongScreenShot;
+			productReference = A0000000000000000000020E /* LongScreenShot.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000701 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					A00000000000000000000501 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+				};
+			};
+			buildConfigurationList = A00000000000000000000801 /* Build configuration list for PBXProject "LongScreenShot" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+				zh_CN,
+			);
+			mainGroup = A00000000000000000000401;
+			productRefGroup = A00000000000000000000404 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A00000000000000000000501 /* LongScreenShot */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000602 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A0000000000000000000010C /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000601 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000101 /* main.swift in Sources */,
+				A00000000000000000000102 /* AppDelegate.swift in Sources */,
+				A00000000000000000000103 /* GlobalHotKey.swift in Sources */,
+				A00000000000000000000104 /* SettingsWindowController.swift in Sources */,
+				A00000000000000000000105 /* CaptureCoordinator.swift in Sources */,
+				A00000000000000000000106 /* CaptureToolbarView.swift in Sources */,
+				A00000000000000000000107 /* OverlayWindowController.swift in Sources */,
+				A00000000000000000000108 /* Annotations.swift in Sources */,
+				A00000000000000000000109 /* ImageServices.swift in Sources */,
+				A0000000000000000000010A /* LongCaptureService.swift in Sources */,
+				A0000000000000000000010B /* PinWindowController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000901 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A00000000000000000000902 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		A00000000000000000000903 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mustangym.LongScreenShot;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A00000000000000000000904 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mustangym.LongScreenShot;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000801 /* Build configuration list for PBXProject "LongScreenShot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000901 /* Debug */,
+				A00000000000000000000902 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00000000000000000000802 /* Build configuration list for PBXNativeTarget "LongScreenShot" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000903 /* Debug */,
+				A00000000000000000000904 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000701 /* Project object */;
+}
