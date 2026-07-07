@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>原生 macOS 菜单栏截图工具，支持截图、标注、OCR、图钉与长截图。</strong>
+  <strong>免费、开源、原生 macOS 菜单栏截图工具，支持截图、标注、OCR、图钉与长截图。</strong>
 </p>
 
 <p align="center">
