@@ -35,6 +35,9 @@ LongScreenShot focuses on a simple native experience: fast to launch, easy to co
 ---
 
 ## Preview
+<p align="center">
+  <img src="docs/images/1.png" width="1000" alt="Screenshot Preview">
+</p>
 
 <p align="center">
   <img src="docs/images/preview-capture.png" width="760" alt="Screenshot Preview">
