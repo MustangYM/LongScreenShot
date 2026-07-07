@@ -35,6 +35,9 @@ LongScreenShot 的重点不是堆功能，而是提供一个尽可能贴近 macO
 ---
 
 ## 预览
+<p align="center">
+  <img src="docs/images/1.png" width="1000" alt="Screenshot Preview">
+</p>
 
 <p align="center">
   <img src="docs/images/preview-capture.png" width="760" alt="Screenshot Preview">
