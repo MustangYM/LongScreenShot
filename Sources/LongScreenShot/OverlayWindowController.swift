@@ -8,7 +8,7 @@ final class CaptureOverlayWindow: NSWindow {
 
 final class OverlayWindowController: NSWindowController, CaptureOverlayViewDelegate {
     var onCancel: (() -> Void)?
-    var onComplete: ((CGImage, CaptureCompletionAction) -> Void)?
+    var onComplete: ((CGImage, CaptureCompletionAction, NSScreen, CGRect?) -> Void)?
     private let snapshot: ScreenSnapshot
     private let startsInLongMode: Bool
     private var longCaptureService: LongCaptureService?
@@ -71,7 +71,7 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
 
     func overlay(_ view: CaptureOverlayView, requested action: CaptureCompletionAction) {
         guard let image = view.renderedSelection() else { return }
-        onComplete?(image, action)
+        onComplete?(image, action, snapshot.screen, view.toastAnchorRect())
     }
 
     func overlayRequestedLongCapture(_ view: CaptureOverlayView) {
@@ -129,11 +129,17 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
                 self.longCaptureToolbarController?.close()
                 self.longCaptureToolbarController = nil
                 self.window?.ignoresMouseEvents = false
+                CaptureHistoryManager.shared.record(image)
                 if saveAfter {
                     self.window?.orderOut(nil)
                     ImageExporter.showSavePanel(for: image, preferredScreen: self.snapshot.screen) { [weak self] in self?.onCancel?() }
                 } else {
                     ImageExporter.copyToPasteboard(image)
+                    FeedbackToast.show(
+                        L10n.tr("feedback.copied"),
+                        screen: self.snapshot.screen,
+                        anchorRect: (self.window?.contentView as? CaptureOverlayView)?.toastAnchorRect()
+                    )
                     self.onCancel?()
                 }
             case let .failure(error):
@@ -166,6 +172,8 @@ protocol CaptureOverlayViewDelegate: AnyObject {
 }
 
 final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDelegate {
+    private static weak var activeOwner: CaptureOverlayView?
+
     private enum SelectionAdjustment: Equatable {
         case move, left, right, top, bottom, topLeft, topRight, bottomLeft, bottomRight
     }
@@ -243,6 +251,11 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var acceptsFirstResponder: Bool { true }
 
+    private func becomeActiveOwner() {
+        Self.activeOwner = self
+        window?.makeFirstResponder(self)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
@@ -259,6 +272,7 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     override func mouseMoved(with event: NSEvent) {
+        becomeActiveOwner()
         let point = convert(event.locationInWindow, from: nil)
         if selection == nil, dragStart == nil {
             updateHoveredWindow(at: point)
@@ -280,7 +294,33 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     override func keyDown(with event: NSEvent) {
+        if let active = Self.activeOwner, active !== self {
+            active.handleKeyDownFromActiveOwner(event)
+            return
+        }
+        becomeActiveOwner()
+        handleKeyDownFromActiveOwner(event)
+    }
+
+    private func handleKeyDownFromActiveOwner(_ event: NSEvent) {
         if event.keyCode == 53 { delegate?.overlayDidCancel(self); return }
+        if event.keyCode == UInt16(kVK_Delete) || event.keyCode == UInt16(kVK_ForwardDelete) {
+            FeedbackToast.show(
+                undoLastAnnotation() ? L10n.tr("feedback.undone") : L10n.tr("feedback.noUndo"),
+                screen: snapshot.screen,
+                anchorRect: toastAnchorRect()
+            )
+            return
+        }
+        if (event.keyCode == UInt16(kVK_Return) || event.keyCode == UInt16(kVK_ANSI_KeypadEnter)),
+           CapturePreferences.quickCopyOnConfirm,
+           selection != nil,
+           inlineTextField == nil,
+           !manualLongCaptureActive {
+            commitInlineTextEditing()
+            delegate?.overlay(self, requested: .copy)
+            return
+        }
         if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "z" {
             if event.modifierFlags.contains(.shift) { redoLastAnnotation() }
             else { undoLastAnnotation() }
@@ -290,8 +330,27 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeKeyAndOrderFront(nil)
+        becomeActiveOwner()
         let point = convert(event.locationInWindow, from: nil)
         guard !isPointInsideToolbar(point) else { return }
+        if event.clickCount >= 2, CapturePreferences.quickCopyOnConfirm, !manualLongCaptureActive {
+            if selection == nil, let preview = currentSelectionPreview {
+                selection = preview.rect.integral
+                hoveredWindow = nil
+                needsDisplay = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.overlay(self, requested: .copy)
+                }
+                return
+            }
+            if let selection, selection.contains(point), activeTool == nil {
+                commitInlineTextEditing()
+                delegate?.overlay(self, requested: .copy)
+                return
+            }
+        }
         if selection == nil {
             dragStart = point
             dragCurrent = point
@@ -325,6 +384,7 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     override func mouseDragged(with event: NSEvent) {
+        becomeActiveOwner()
         guard dragStart != nil else { return }
         let point = convert(event.locationInWindow, from: nil)
         if let adjustment = annotationAdjustment {
@@ -356,6 +416,7 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     override func mouseUp(with event: NSEvent) {
+        becomeActiveOwner()
         if annotationAdjustment != nil {
             finishAnnotationAdjustment()
             return
@@ -745,6 +806,16 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         }
         if let hoveredWindow { return (hoveredWindow.rect, hoveredWindow.label) }
         return nil
+    }
+
+    private func drawDimmedSnapshot(revealing revealRect: CGRect?) {
+        let image = NSImage(cgImage: snapshot.image, size: bounds.size)
+        image.draw(in: bounds)
+        NSColor.black.withAlphaComponent(0.48).setFill()
+        bounds.fill()
+        if let revealRect {
+            reveal(image: image, in: revealRect)
+        }
     }
 
     private func reveal(image: NSImage, in rect: CGRect) {
@@ -1337,6 +1408,20 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         return AnnotationRenderer.render(snapshot: snapshot, selection: selection, annotations: annotations)
     }
 
+    func toastAnchorRect() -> CGRect? {
+        let base = snapshot.screen.frame
+        let local = selection ?? bounds
+        guard !local.isNull, local.width > 0, local.height > 0 else { return base }
+        let globalRect = CGRect(
+            x: base.minX + local.minX,
+            y: base.minY + local.minY,
+            width: local.width,
+            height: local.height
+        )
+        let clipped = globalRect.intersection(snapshot.screen.visibleFrame)
+        return clipped.isNull ? globalRect.intersection(base) : clipped
+    }
+
     @discardableResult
     private func record(_ annotation: Annotation) -> Int {
         pushUndoSnapshot(annotations)
@@ -1362,15 +1447,17 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         return index
     }
 
-    private func undoLastAnnotation() {
+    @discardableResult
+    private func undoLastAnnotation() -> Bool {
         commitInlineTextEditing()
-        guard let previous = undoSnapshots.popLast() else { return }
+        guard let previous = undoSnapshots.popLast() else { return false }
         redoSnapshots.append(annotations)
         annotations = previous
         selectedMosaicIndex = nil
         selectedAnnotationIndex = nil
         clearMosaicPreviewCache()
         needsDisplay = true
+        return true
     }
 
     private func redoLastAnnotation() {

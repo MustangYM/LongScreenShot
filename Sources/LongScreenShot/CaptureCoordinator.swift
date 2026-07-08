@@ -68,7 +68,7 @@ enum WindowDetector {
 
 final class CaptureCoordinator: NSObject {
     var onFinish: (() -> Void)?
-    private var overlayController: OverlayWindowController?
+    private var overlayControllers: [OverlayWindowController] = []
     private let initialLongMode: Bool
 
     init(initialLongMode: Bool) {
@@ -76,16 +76,20 @@ final class CaptureCoordinator: NSObject {
     }
 
     func start() {
-        guard let screen = screenUnderPointer(), let snapshot = capture(screen: screen) else {
+        let snapshots = NSScreen.screens.compactMap { capture(screen: $0) }
+        guard !snapshots.isEmpty else {
             finish(); return
         }
-        let controller = OverlayWindowController(snapshot: snapshot, startsInLongMode: initialLongMode)
-        overlayController = controller
-        controller.onCancel = { [weak self] in self?.finish() }
-        controller.onComplete = { [weak self] image, action in
-            self?.handle(image: image, action: action)
+
+        overlayControllers = snapshots.map { snapshot in
+            let controller = OverlayWindowController(snapshot: snapshot, startsInLongMode: initialLongMode)
+            controller.onCancel = { [weak self] in self?.finish() }
+            controller.onComplete = { [weak self] image, action, screen, anchorRect in
+                self?.handle(image: image, action: action, sourceScreen: screen, toastAnchorRect: anchorRect)
+            }
+            return controller
         }
-        controller.show()
+        overlayControllers.forEach { $0.show() }
     }
 
     private func screenUnderPointer() -> NSScreen? {
@@ -114,13 +118,20 @@ final class CaptureCoordinator: NSObject {
         }
     }
 
-    private func handle(image: CGImage, action: CaptureCompletionAction) {
+    private func handle(
+        image: CGImage,
+        action: CaptureCompletionAction,
+        sourceScreen: NSScreen,
+        toastAnchorRect: CGRect?
+    ) {
+        CaptureHistoryManager.shared.record(image)
         switch action {
         case .copy:
             ImageExporter.copyToPasteboard(image)
+            FeedbackToast.show(L10n.tr("feedback.copied"), screen: sourceScreen, anchorRect: toastAnchorRect)
             finish()
         case .save:
-            ImageExporter.showSavePanel(for: image) { [weak self] in self?.finish() }
+            ImageExporter.showSavePanel(for: image, preferredScreen: sourceScreen) { [weak self] in self?.finish() }
         case .pin:
             PinWindowController.pin(image: image)
             finish()
@@ -146,8 +157,7 @@ final class CaptureCoordinator: NSObject {
         NSPasteboard.general.setString(text, forType: .string)
 
         let provider = TranslationProvider.current
-        overlayController?.close()
-        overlayController = nil
+        closeOverlays()
 
         TranslationService.translate(text, provider: provider) { [weak self] result in
             switch result {
@@ -166,9 +176,13 @@ final class CaptureCoordinator: NSObject {
         }
     }
 
+    private func closeOverlays() {
+        overlayControllers.forEach { $0.close() }
+        overlayControllers.removeAll()
+    }
+
     private func finish() {
-        overlayController?.close()
-        overlayController = nil
+        closeOverlays()
         NSApp.activate(ignoringOtherApps: true)
         onFinish?()
         onFinish = nil

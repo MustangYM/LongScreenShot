@@ -79,7 +79,10 @@ enum AnnotationRenderer {
         switch annotation {
         case let .rectangle(rect, color, width):
             context.setStrokeColor(color.cgColor); context.setLineWidth(width)
-            context.stroke(rect.insetBy(dx: width / 2, dy: width / 2))
+            let adjusted = rect.insetBy(dx: width / 2, dy: width / 2)
+            let radius = min(10, max(5, min(adjusted.width, adjusted.height) * 0.08))
+            context.addPath(CGPath(roundedRect: adjusted, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.strokePath()
         case let .ellipse(rect, color, width):
             context.setStrokeColor(color.cgColor); context.setLineWidth(width)
             context.strokeEllipse(in: rect.insetBy(dx: width / 2, dy: width / 2))

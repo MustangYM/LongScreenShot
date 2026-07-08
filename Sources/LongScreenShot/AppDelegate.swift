@@ -3,6 +3,146 @@ import Carbon
 import CoreGraphics
 import ServiceManagement
 
+private enum StatusBarIconFactory {
+    static func image() -> NSImage {
+        if let custom = NSImage(named: "StatusBarIcon"), !custom.representations.isEmpty {
+            let image = (custom.copy() as? NSImage) ?? custom
+            image.size = NSSize(width: 18, height: 18)
+
+            // 关键：不要让系统当模板图标自动染色
+            image.isTemplate = false
+
+            return image
+        }
+
+        return generatedWhiteIcon()
+    }
+
+    private static func whiteMaskImage(from source: NSImage) -> NSImage {
+        let pointSize = NSSize(width: 18, height: 18)
+        let pixelSize = 42
+        guard let sourceRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelSize,
+            pixelsHigh: pixelSize,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let outputRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelSize,
+            pixelsHigh: pixelSize,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return generatedWhiteIcon() }
+
+        sourceRep.size = pointSize
+        outputRep.size = pointSize
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: sourceRep)
+        NSColor.clear.setFill()
+        NSRect(origin: .zero, size: pointSize).fill()
+        source.draw(
+            in: NSRect(origin: .zero, size: pointSize).insetBy(dx: 1, dy: 1),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.high]
+        )
+        NSGraphicsContext.restoreGraphicsState()
+
+        var paintedPixels = 0
+        for y in 0..<pixelSize {
+            for x in 0..<pixelSize {
+                guard let color = sourceRep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let alpha = color.alphaComponent
+                guard alpha > 0.04 else { continue }
+                let red = color.redComponent
+                let green = color.greenComponent
+                let blue = color.blueComponent
+                let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                let saturation = max(red, green, blue) - min(red, green, blue)
+                // 只保留图标线条：深色像素直接保留；有明显色彩但不接近白色的像素也保留。
+                // 这样即使源图不小心带了浅色/棋盘格背景，也不会被染成一整块白方形。
+                guard luminance < 0.76 || (saturation > 0.16 && luminance < 0.88) else { continue }
+                outputRep.setColor(NSColor.white.withAlphaComponent(min(1, max(0.12, alpha))), atX: x, y: y)
+                paintedPixels += 1
+            }
+        }
+        guard paintedPixels > 8 else { return generatedWhiteIcon() }
+        let image = NSImage(size: pointSize)
+        image.addRepresentation(outputRep)
+        image.isTemplate = false
+        return image
+    }
+
+    private static func generatedWhiteIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 19, height: 19), flipped: false) { rect in
+            func makeCorners(in rect: NSRect, offset: CGFloat = 0) -> NSBezierPath {
+                let path = NSBezierPath()
+                path.lineCapStyle = .round
+                path.lineJoinStyle = .round
+                let inset: CGFloat = 2.6
+                let corner: CGFloat = 4.7
+                path.move(to: CGPoint(x: rect.minX + inset + corner, y: rect.maxY - inset + offset))
+                path.line(to: CGPoint(x: rect.minX + inset, y: rect.maxY - inset + offset))
+                path.line(to: CGPoint(x: rect.minX + inset, y: rect.maxY - inset - corner + offset))
+                path.move(to: CGPoint(x: rect.maxX - inset - corner, y: rect.maxY - inset + offset))
+                path.line(to: CGPoint(x: rect.maxX - inset, y: rect.maxY - inset + offset))
+                path.line(to: CGPoint(x: rect.maxX - inset, y: rect.maxY - inset - corner + offset))
+                path.move(to: CGPoint(x: rect.minX + inset, y: rect.minY + inset + corner + offset))
+                path.line(to: CGPoint(x: rect.minX + inset, y: rect.minY + inset + offset))
+                path.line(to: CGPoint(x: rect.minX + inset + corner, y: rect.minY + inset + offset))
+                path.move(to: CGPoint(x: rect.maxX - inset - corner, y: rect.minY + inset + offset))
+                path.line(to: CGPoint(x: rect.maxX - inset, y: rect.minY + inset + offset))
+                path.line(to: CGPoint(x: rect.maxX - inset, y: rect.minY + inset + corner + offset))
+                return path
+            }
+
+            func makeArrow(in rect: NSRect, offset: CGFloat = 0) -> NSBezierPath {
+                let path = NSBezierPath()
+                path.lineCapStyle = .round
+                path.lineJoinStyle = .round
+                path.move(to: CGPoint(x: rect.midX, y: rect.maxY - 5.4 + offset))
+                path.line(to: CGPoint(x: rect.midX, y: rect.minY + 5.8 + offset))
+                path.move(to: CGPoint(x: rect.midX - 3.3, y: rect.minY + 8.6 + offset))
+                path.line(to: CGPoint(x: rect.midX, y: rect.minY + 5.4 + offset))
+                path.line(to: CGPoint(x: rect.midX + 3.3, y: rect.minY + 8.6 + offset))
+                return path
+            }
+
+            NSColor.black.withAlphaComponent(0.34).setStroke()
+            let shadowCorners = makeCorners(in: rect, offset: -0.45)
+            shadowCorners.lineWidth = 3.0
+            shadowCorners.stroke()
+            let shadowArrow = makeArrow(in: rect, offset: -0.45)
+            shadowArrow.lineWidth = 3.0
+            shadowArrow.stroke()
+
+            NSColor.white.setStroke()
+            let corners = makeCorners(in: rect)
+            corners.lineWidth = 2.0
+            corners.stroke()
+            let arrow = makeArrow(in: rect)
+            arrow.lineWidth = 2.0
+            arrow.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: GlobalHotKey?
@@ -27,22 +167,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UpdateChecker.shared.checkAutomaticallyIfNeeded()
     }
 
+    private func refreshStatusItemIcon() {
+        guard let button = statusItem?.button else { return }
+
+        button.title = ""
+        button.toolTip = "LongScreenShot"
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+
+        // 强制原图显示时，不要再给 template tint
+        button.contentTintColor = nil
+
+        let image = StatusBarIconFactory.image()
+        image.isTemplate = false
+        button.image = image
+    }
+
     private func configureStatusItem() {
         if statusItem == nil {
             statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         }
-        if let button = statusItem.button {
-            let image = NSImage(named: "StatusBarIcon")
-                ?? NSImage(systemSymbolName: "viewfinder", accessibilityDescription: "LongScreenShot")
-            image?.isTemplate = true
-            image?.size = NSSize(width: 18, height: 18)
-            button.image = image
+        statusItem.length = 28
+        refreshStatusItemIcon()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.refreshStatusItemIcon()
         }
 
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(withTitle: L10n.tr("menu.capture"), action: #selector(startCapture), keyEquivalent: "")
         menu.addItem(withTitle: L10n.tr("menu.longCapture"), action: #selector(startLongCapture), keyEquivalent: "")
+        menu.addItem(withTitle: L10n.tr("menu.history"), action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: L10n.tr("menu.closePins"), action: #selector(closePins), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
@@ -75,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func startCapture() { beginCapture(longMode: false) }
     @objc private func startLongCapture() { beginCapture(longMode: true) }
     @objc private func checkForUpdates() { UpdateChecker.shared.checkForUpdates(userInitiated: true) }
+    @objc private func showHistory() { CaptureHistoryWindowController.shared.showAtPointer() }
 
     private func beginCapture(longMode: Bool) {
         guard captureCoordinator == nil else { return }
@@ -108,9 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showSettings() {
         if settingsController == nil { settingsController = SettingsWindowController() }
-        settingsController?.showWindow(nil)
-        settingsController?.window?.center()
-        NSApp.activate(ignoringOtherApps: true)
+        settingsController?.presentFromStatusMenu()
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
@@ -238,6 +392,7 @@ enum L10n {
             "language.system": "跟随系统",
             "menu.capture": "框选截图",
             "menu.longCapture": "长截图",
+            "menu.history": "历史截图",
             "menu.closePins": "关闭所有图钉",
             "menu.settings": "设置…",
             "menu.checkUpdates": "检查更新…",
@@ -246,6 +401,7 @@ enum L10n {
             "permission.message": "请在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中允许 LongScreenShot，然后重新启动应用。",
             "permission.openSettings": "打开系统设置",
             "common.cancel": "取消",
+            "common.ok": "确定",
             "common.copy": "复制",
             "common.later": "稍后",
             "settings.title": "LongScreenShot 设置",
@@ -270,6 +426,13 @@ enum L10n {
             "settings.autoCheckUpdates": "自动检查更新并提醒",
             "settings.checkUpdates": "检查更新…",
             "settings.updateHint": "自动检查会访问 GitHub Releases；发现新版本时会提醒你打开下载页，不会在后台悄悄替换应用。",
+            "settings.quickCopyOnConfirm": "双击或按回车时直接复制截图",
+            "settings.history": "历史截图",
+            "settings.saveHistory": "保存历史截图",
+            "settings.historyLimit": "最多保留",
+            "settings.historyLocation": "保存位置",
+            "settings.choose": "选择…",
+            "settings.historyHint": "最多保留 1～200 张；超过数量后会自动删除最旧的截图。历史窗口可从菜单栏打开。",
             "update.checking": "正在检查更新…",
             "update.availableTitle": "发现新版本",
             "update.availableMessage": "%@ 已发布；当前版本是 %@。",
@@ -278,6 +441,18 @@ enum L10n {
             "update.noUpdateMessage": "当前版本 %@ 已是最新。",
             "update.failedTitle": "无法检查更新",
             "update.failedMessage": "GitHub Releases 暂时不可用，请稍后再试。",
+            "history.title": "历史截图",
+            "history.empty": "还没有历史截图",
+            "history.delete": "删除",
+            "history.deleted": "已移除截图",
+            "history.showInFinder": "在 Finder 中显示",
+            "history.justNow": "刚刚",
+            "history.minutesAgo": "%d 分钟前",
+            "history.hoursAgo": "%d 小时前",
+            "history.oneDayAgo": "一天前",
+            "feedback.copied": "已复制到剪贴板",
+            "feedback.undone": "已撤销上一步",
+            "feedback.noUndo": "没有可撤销的操作",
             "provider.baidu": "百度翻译",
             "provider.google": "谷歌翻译",
             "toolbar.rectangle": "矩形",
@@ -330,6 +505,7 @@ enum L10n {
             "language.system": "Follow System",
             "menu.capture": "Area Capture",
             "menu.longCapture": "Scrolling Capture",
+            "menu.history": "Screenshot History",
             "menu.closePins": "Close All Pins",
             "menu.settings": "Settings…",
             "menu.checkUpdates": "Check for Updates…",
@@ -338,6 +514,7 @@ enum L10n {
             "permission.message": "Allow LongScreenShot in System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app.",
             "permission.openSettings": "Open System Settings",
             "common.cancel": "Cancel",
+            "common.ok": "OK",
             "common.copy": "Copy",
             "common.later": "Later",
             "settings.title": "LongScreenShot Settings",
@@ -362,6 +539,13 @@ enum L10n {
             "settings.autoCheckUpdates": "Automatically check for updates",
             "settings.checkUpdates": "Check for Updates…",
             "settings.updateHint": "The app checks GitHub Releases and prompts you when a new version is available. It will not replace the app silently in the background.",
+            "settings.quickCopyOnConfirm": "Double-click or press Return to copy",
+            "settings.history": "History",
+            "settings.saveHistory": "Save screenshot history",
+            "settings.historyLimit": "Keep up to",
+            "settings.historyLocation": "Save location",
+            "settings.choose": "Choose…",
+            "settings.historyHint": "Keep 1–200 screenshots. Older items are removed automatically. Open history from the menu bar.",
             "update.checking": "Checking for updates…",
             "update.availableTitle": "A New Version Is Available",
             "update.availableMessage": "%@ is available. Current version: %@.",
@@ -370,6 +554,18 @@ enum L10n {
             "update.noUpdateMessage": "Version %@ is the latest version.",
             "update.failedTitle": "Could Not Check for Updates",
             "update.failedMessage": "GitHub Releases is temporarily unavailable. Please try again later.",
+            "history.title": "Screenshot History",
+            "history.empty": "No screenshots yet",
+            "history.delete": "Delete",
+            "history.deleted": "Screenshot Removed",
+            "history.showInFinder": "Show in Finder",
+            "history.justNow": "just now",
+            "history.minutesAgo": "%d min ago",
+            "history.hoursAgo": "%d hr ago",
+            "history.oneDayAgo": "1 day ago",
+            "feedback.copied": "Copied to Clipboard",
+            "feedback.undone": "Last Action Undone",
+            "feedback.noUndo": "Nothing to Undo",
             "provider.baidu": "Baidu Translate",
             "provider.google": "Google Translate",
             "toolbar.rectangle": "Rectangle",
@@ -422,6 +618,7 @@ enum L10n {
             "language.system": "システムに合わせる",
             "menu.capture": "範囲スクリーンショット",
             "menu.longCapture": "スクロールキャプチャ",
+            "menu.history": "履歴",
             "menu.closePins": "すべてのピンを閉じる",
             "menu.settings": "設定…",
             "menu.checkUpdates": "アップデートを確認…",
@@ -430,6 +627,7 @@ enum L10n {
             "permission.message": "システム設定 → プライバシーとセキュリティ → 画面とシステムオーディオ収録で LongScreenShot を許可してから、アプリを再起動してください。",
             "permission.openSettings": "システム設定を開く",
             "common.cancel": "キャンセル",
+            "common.ok": "OK",
             "common.copy": "コピー",
             "common.later": "あとで",
             "settings.title": "LongScreenShot 設定",
@@ -454,6 +652,13 @@ enum L10n {
             "settings.autoCheckUpdates": "アップデートを自動確認して通知",
             "settings.checkUpdates": "アップデートを確認…",
             "settings.updateHint": "GitHub Releases を確認し、新しいバージョンがある場合はダウンロードページを開くよう通知します。バックグラウンドでアプリを勝手に置き換えることはありません。",
+            "settings.quickCopyOnConfirm": "ダブルクリックまたは Return でコピー",
+            "settings.history": "履歴",
+            "settings.saveHistory": "スクリーンショット履歴を保存",
+            "settings.historyLimit": "最大保存数",
+            "settings.historyLocation": "保存場所",
+            "settings.choose": "選択…",
+            "settings.historyHint": "1〜200 枚まで保存できます。古い項目は自動的に削除されます。履歴はメニューバーから開けます。",
             "update.checking": "アップデートを確認中…",
             "update.availableTitle": "新しいバージョンがあります",
             "update.availableMessage": "%@ が利用可能です。現在のバージョン：%@。",
@@ -462,6 +667,18 @@ enum L10n {
             "update.noUpdateMessage": "現在のバージョン %@ は最新です。",
             "update.failedTitle": "アップデートを確認できません",
             "update.failedMessage": "GitHub Releases を一時的に利用できません。あとでもう一度お試しください。",
+            "history.title": "スクリーンショット履歴",
+            "history.empty": "履歴はまだありません",
+            "history.delete": "削除",
+            "history.deleted": "スクリーンショットを削除しました",
+            "history.showInFinder": "Finder に表示",
+            "history.justNow": "たった今",
+            "history.minutesAgo": "%d 分前",
+            "history.hoursAgo": "%d 時間前",
+            "history.oneDayAgo": "1日前",
+            "feedback.copied": "クリップボードにコピーしました",
+            "feedback.undone": "直前の操作を取り消しました",
+            "feedback.noUndo": "取り消せる操作はありません",
             "provider.baidu": "百度翻訳",
             "provider.google": "Google 翻訳",
             "toolbar.rectangle": "四角形",
@@ -514,6 +731,7 @@ enum L10n {
             "language.system": "시스템 설정 사용",
             "menu.capture": "영역 캡처",
             "menu.longCapture": "스크롤 캡처",
+            "menu.history": "스크린샷 기록",
             "menu.closePins": "모든 핀 닫기",
             "menu.settings": "설정…",
             "menu.checkUpdates": "업데이트 확인…",
@@ -522,6 +740,7 @@ enum L10n {
             "permission.message": "시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 기록에서 LongScreenShot을 허용한 뒤 앱을 다시 시작하세요.",
             "permission.openSettings": "시스템 설정 열기",
             "common.cancel": "취소",
+            "common.ok": "확인",
             "common.copy": "복사",
             "common.later": "나중에",
             "settings.title": "LongScreenShot 설정",
@@ -546,6 +765,13 @@ enum L10n {
             "settings.autoCheckUpdates": "업데이트 자동 확인 및 알림",
             "settings.checkUpdates": "업데이트 확인…",
             "settings.updateHint": "GitHub Releases를 확인하고 새 버전이 있으면 다운로드 페이지를 열도록 알려줍니다. 백그라운드에서 앱을 자동으로 교체하지 않습니다.",
+            "settings.quickCopyOnConfirm": "두 번 클릭 또는 Return으로 복사",
+            "settings.history": "기록",
+            "settings.saveHistory": "스크린샷 기록 저장",
+            "settings.historyLimit": "최대 보관",
+            "settings.historyLocation": "저장 위치",
+            "settings.choose": "선택…",
+            "settings.historyHint": "1~200장을 보관합니다. 오래된 항목은 자동으로 삭제됩니다. 기록은 메뉴 막대에서 열 수 있습니다.",
             "update.checking": "업데이트 확인 중…",
             "update.availableTitle": "새 버전이 있습니다",
             "update.availableMessage": "%@ 버전을 사용할 수 있습니다. 현재 버전: %@.",
@@ -554,6 +780,18 @@ enum L10n {
             "update.noUpdateMessage": "현재 버전 %@이 최신입니다.",
             "update.failedTitle": "업데이트를 확인할 수 없습니다",
             "update.failedMessage": "GitHub Releases를 일시적으로 사용할 수 없습니다. 나중에 다시 시도하세요.",
+            "history.title": "스크린샷 기록",
+            "history.empty": "아직 기록이 없습니다",
+            "history.delete": "삭제",
+            "history.deleted": "스크린샷을 제거했습니다",
+            "history.showInFinder": "Finder에서 보기",
+            "history.justNow": "방금",
+            "history.minutesAgo": "%d분 전",
+            "history.hoursAgo": "%d시간 전",
+            "history.oneDayAgo": "하루 전",
+            "feedback.copied": "클립보드에 복사됨",
+            "feedback.undone": "마지막 작업을 취소했습니다",
+            "feedback.noUndo": "취소할 작업이 없습니다",
             "provider.baidu": "바이두 번역",
             "provider.google": "구글 번역",
             "toolbar.rectangle": "사각형",
@@ -606,6 +844,7 @@ enum L10n {
             "language.system": "Suivre le système",
             "menu.capture": "Capture de zone",
             "menu.longCapture": "Capture défilante",
+            "menu.history": "Historique",
             "menu.closePins": "Fermer toutes les épingles",
             "menu.settings": "Réglages…",
             "menu.checkUpdates": "Rechercher des mises à jour…",
@@ -614,6 +853,7 @@ enum L10n {
             "permission.message": "Autorisez LongScreenShot dans Réglages Système → Confidentialité et sécurité → Enregistrement de l’écran et de l’audio système, puis redémarrez l’app.",
             "permission.openSettings": "Ouvrir Réglages Système",
             "common.cancel": "Annuler",
+            "common.ok": "OK",
             "common.copy": "Copier",
             "common.later": "Plus tard",
             "settings.title": "Réglages LongScreenShot",
@@ -638,6 +878,13 @@ enum L10n {
             "settings.autoCheckUpdates": "Rechercher automatiquement les mises à jour",
             "settings.checkUpdates": "Rechercher…",
             "settings.updateHint": "L’app consulte GitHub Releases et vous prévient lorsqu’une nouvelle version est disponible. Elle ne remplace pas l’app en arrière-plan sans action de votre part.",
+            "settings.quickCopyOnConfirm": "Double-clic ou Retour pour copier",
+            "settings.history": "Historique",
+            "settings.saveHistory": "Enregistrer l’historique",
+            "settings.historyLimit": "Conserver",
+            "settings.historyLocation": "Emplacement",
+            "settings.choose": "Choisir…",
+            "settings.historyHint": "Conserve 1 à 200 captures. Les plus anciennes sont supprimées automatiquement. L’historique s’ouvre depuis la barre des menus.",
             "update.checking": "Recherche de mises à jour…",
             "update.availableTitle": "Nouvelle version disponible",
             "update.availableMessage": "%@ est disponible. Version actuelle : %@.",
@@ -646,6 +893,18 @@ enum L10n {
             "update.noUpdateMessage": "La version %@ est la dernière version.",
             "update.failedTitle": "Impossible de rechercher les mises à jour",
             "update.failedMessage": "GitHub Releases est temporairement indisponible. Réessayez plus tard.",
+            "history.title": "Historique des captures",
+            "history.empty": "Aucune capture pour le moment",
+            "history.delete": "Supprimer",
+            "history.deleted": "Capture supprimée",
+            "history.showInFinder": "Afficher dans le Finder",
+            "history.justNow": "à l’instant",
+            "history.minutesAgo": "il y a %d min",
+            "history.hoursAgo": "il y a %d h",
+            "history.oneDayAgo": "il y a 1 jour",
+            "feedback.copied": "Copié dans le presse-papiers",
+            "feedback.undone": "Dernière action annulée",
+            "feedback.noUndo": "Rien à annuler",
             "provider.baidu": "Baidu Traduction",
             "provider.google": "Google Traduction",
             "toolbar.rectangle": "Rectangle",
@@ -698,6 +957,7 @@ enum L10n {
             "language.system": "Systemsprache",
             "menu.capture": "Bereich aufnehmen",
             "menu.longCapture": "Scroll-Aufnahme",
+            "menu.history": "Verlauf",
             "menu.closePins": "Alle Pins schließen",
             "menu.settings": "Einstellungen…",
             "menu.checkUpdates": "Nach Updates suchen…",
@@ -706,6 +966,7 @@ enum L10n {
             "permission.message": "Erlaube LongScreenShot in Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- und Systemaudioaufnahme und starte die App anschließend neu.",
             "permission.openSettings": "Systemeinstellungen öffnen",
             "common.cancel": "Abbrechen",
+            "common.ok": "OK",
             "common.copy": "Kopieren",
             "common.later": "Später",
             "settings.title": "LongScreenShot Einstellungen",
@@ -730,6 +991,13 @@ enum L10n {
             "settings.autoCheckUpdates": "Automatisch nach Updates suchen",
             "settings.checkUpdates": "Nach Updates suchen…",
             "settings.updateHint": "Die App prüft GitHub Releases und informiert dich bei einer neuen Version. Sie ersetzt die App nicht heimlich im Hintergrund.",
+            "settings.quickCopyOnConfirm": "Doppelklick oder Return kopiert",
+            "settings.history": "Verlauf",
+            "settings.saveHistory": "Screenshot-Verlauf speichern",
+            "settings.historyLimit": "Maximal behalten",
+            "settings.historyLocation": "Speicherort",
+            "settings.choose": "Wählen…",
+            "settings.historyHint": "Speichert 1–200 Screenshots. Ältere Einträge werden automatisch entfernt. Der Verlauf ist über die Menüleiste erreichbar.",
             "update.checking": "Suche nach Updates…",
             "update.availableTitle": "Neue Version verfügbar",
             "update.availableMessage": "%@ ist verfügbar. Aktuelle Version: %@.",
@@ -738,6 +1006,18 @@ enum L10n {
             "update.noUpdateMessage": "Version %@ ist die neueste Version.",
             "update.failedTitle": "Updates konnten nicht geprüft werden",
             "update.failedMessage": "GitHub Releases ist vorübergehend nicht verfügbar. Bitte später erneut versuchen.",
+            "history.title": "Screenshot-Verlauf",
+            "history.empty": "Noch keine Screenshots",
+            "history.delete": "Löschen",
+            "history.deleted": "Screenshot entfernt",
+            "history.showInFinder": "Im Finder anzeigen",
+            "history.justNow": "gerade eben",
+            "history.minutesAgo": "vor %d Min.",
+            "history.hoursAgo": "vor %d Std.",
+            "history.oneDayAgo": "vor 1 Tag",
+            "feedback.copied": "In die Zwischenablage kopiert",
+            "feedback.undone": "Letzte Aktion rückgängig gemacht",
+            "feedback.noUndo": "Nichts zum Rückgängigmachen",
             "provider.baidu": "Baidu Übersetzer",
             "provider.google": "Google Übersetzer",
             "toolbar.rectangle": "Rechteck",
@@ -790,6 +1070,7 @@ enum L10n {
             "language.system": "Seguir sistema",
             "menu.capture": "Captura de área",
             "menu.longCapture": "Captura con desplazamiento",
+            "menu.history": "Historial",
             "menu.closePins": "Cerrar todos los pines",
             "menu.settings": "Ajustes…",
             "menu.checkUpdates": "Buscar actualizaciones…",
@@ -798,6 +1079,7 @@ enum L10n {
             "permission.message": "Permite LongScreenShot en Ajustes del Sistema → Privacidad y seguridad → Grabación de pantalla y audio del sistema, y reinicia la app.",
             "permission.openSettings": "Abrir Ajustes del Sistema",
             "common.cancel": "Cancelar",
+            "common.ok": "Aceptar",
             "common.copy": "Copiar",
             "common.later": "Más tarde",
             "settings.title": "Ajustes de LongScreenShot",
@@ -822,6 +1104,13 @@ enum L10n {
             "settings.autoCheckUpdates": "Buscar actualizaciones automáticamente",
             "settings.checkUpdates": "Buscar actualizaciones…",
             "settings.updateHint": "La app consulta GitHub Releases y te avisa cuando hay una nueva versión. No reemplaza la app en segundo plano sin que lo decidas.",
+            "settings.quickCopyOnConfirm": "Doble clic o Return para copiar",
+            "settings.history": "Historial",
+            "settings.saveHistory": "Guardar historial de capturas",
+            "settings.historyLimit": "Conservar hasta",
+            "settings.historyLocation": "Ubicación",
+            "settings.choose": "Elegir…",
+            "settings.historyHint": "Conserva entre 1 y 200 capturas. Las más antiguas se eliminan automáticamente. El historial se abre desde la barra de menús.",
             "update.checking": "Buscando actualizaciones…",
             "update.availableTitle": "Hay una nueva versión disponible",
             "update.availableMessage": "%@ está disponible. Versión actual: %@.",
@@ -830,6 +1119,18 @@ enum L10n {
             "update.noUpdateMessage": "La versión %@ es la más reciente.",
             "update.failedTitle": "No se pudieron buscar actualizaciones",
             "update.failedMessage": "GitHub Releases no está disponible temporalmente. Inténtalo de nuevo más tarde.",
+            "history.title": "Historial de capturas",
+            "history.empty": "Todavía no hay capturas",
+            "history.delete": "Eliminar",
+            "history.deleted": "Captura eliminada",
+            "history.showInFinder": "Mostrar en Finder",
+            "history.justNow": "ahora mismo",
+            "history.minutesAgo": "hace %d min",
+            "history.hoursAgo": "hace %d h",
+            "history.oneDayAgo": "hace 1 día",
+            "feedback.copied": "Copiado al portapapeles",
+            "feedback.undone": "Última acción deshecha",
+            "feedback.noUndo": "Nada que deshacer",
             "provider.baidu": "Baidu Translate",
             "provider.google": "Google Translate",
             "toolbar.rectangle": "Rectángulo",

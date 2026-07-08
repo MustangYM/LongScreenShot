@@ -11,11 +11,18 @@ final class SettingsWindowController: NSWindowController {
     private let translationPopup = NSPopUpButton()
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let autoUpdateCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let quickCopyCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let historyCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let historyLimitField = NSTextField(string: "")
+    private let historyLocationLabel = NSTextField(labelWithString: "")
+    private let preferredWindowWidth: CGFloat = 700
+    private let generalContentHeight: CGFloat = 740
+    private let aboutContentHeight: CGFloat = 520
     private var currentPage: Page = .general
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 740),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -32,6 +39,22 @@ final class SettingsWindowController: NSWindowController {
         rebuildPage()
     }
 
+    func presentFromStatusMenu() {
+        guard let window else { return }
+        if !window.isVisible { window.center() }
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.level = .floating
+        NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window.orderFrontRegardless()
+        window.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
     private func buildShell() {
         guard let content = window?.contentView else { return }
         topSegment.segmentCount = 2
@@ -40,6 +63,8 @@ final class SettingsWindowController: NSWindowController {
         topSegment.action = #selector(changePage)
         topSegment.translatesAutoresizingMaskIntoConstraints = false
         pageContainer.translatesAutoresizingMaskIntoConstraints = false
+        content.wantsLayer = true
+        pageContainer.wantsLayer = true
         content.addSubview(topSegment)
         content.addSubview(pageContainer)
 
@@ -60,13 +85,37 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func rebuildPage() {
-        pageContainer.subviews.forEach { $0.removeFromSuperview() }
-        switch currentPage {
-        case .general:
-            buildGeneralPage()
-        case .about:
-            buildAboutPage()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            pageContainer.subviews.forEach { $0.removeFromSuperview() }
+            switch currentPage {
+            case .general:
+                buildGeneralPage()
+            case .about:
+                buildAboutPage()
+            }
+            pageContainer.layoutSubtreeIfNeeded()
         }
+        resizeWindowForCurrentPage(animated: window?.isVisible == true)
+    }
+
+    private func resizeWindowForCurrentPage(animated: Bool) {
+        guard let window else { return }
+        let contentHeight = currentPage == .general ? generalContentHeight : aboutContentHeight
+        let targetContentRect = NSRect(x: 0, y: 0, width: preferredWindowWidth, height: contentHeight)
+        let targetFrameSize = window.frameRect(forContentRect: targetContentRect).size
+        var frame = window.frame
+        let maxY = frame.maxY
+        frame.size.width = targetFrameSize.width
+        frame.size.height = targetFrameSize.height
+        frame.origin.y = maxY - frame.height
+        guard abs(window.frame.height - frame.height) > 0.5 || abs(window.frame.width - frame.width) > 0.5 else { return }
+        guard animated else {
+            window.setFrame(frame, display: true)
+            return
+        }
+        window.setFrame(frame, display: true, animate: true)
     }
 
     private func buildGeneralPage() {
@@ -89,6 +138,31 @@ final class SettingsWindowController: NSWindowController {
         let updateHint = NSTextField(wrappingLabelWithString: L10n.tr("settings.updateHint"))
         updateHint.textColor = .secondaryLabelColor
 
+        quickCopyCheckbox.title = L10n.tr("settings.quickCopyOnConfirm")
+        quickCopyCheckbox.state = CapturePreferences.quickCopyOnConfirm ? .on : .off
+        quickCopyCheckbox.target = self
+        quickCopyCheckbox.action = #selector(toggleQuickCopyOnConfirm)
+
+        let historyTitle = rowLabel("settings.history")
+        historyCheckbox.title = L10n.tr("settings.saveHistory")
+        historyCheckbox.state = CaptureHistoryPreferences.isEnabled ? .on : .off
+        historyCheckbox.target = self
+        historyCheckbox.action = #selector(toggleHistory)
+
+        let historyLimitTitle = rowLabel("settings.historyLimit")
+        historyLimitField.stringValue = "\(CaptureHistoryPreferences.maximumCount)"
+        historyLimitField.alignment = .center
+        historyLimitField.formatter = historyLimitFormatter()
+        historyLimitField.target = self
+        historyLimitField.action = #selector(changeHistoryLimit)
+
+        let historyLocationTitle = rowLabel("settings.historyLocation")
+        historyLocationLabel.stringValue = historyLocationText()
+        historyLocationLabel.lineBreakMode = .byTruncatingMiddle
+        let chooseHistoryLocationButton = NSButton(title: L10n.tr("settings.choose"), target: self, action: #selector(chooseHistoryLocation))
+        let historyHint = NSTextField(wrappingLabelWithString: L10n.tr("settings.historyHint"))
+        historyHint.textColor = .secondaryLabelColor
+
         let hotKeyTitle = rowLabel("settings.hotkey")
         recorder.configuration = .current
         let restore = NSButton(title: L10n.tr("settings.restoreDefault"), target: self, action: #selector(restoreDefault))
@@ -108,6 +182,10 @@ final class SettingsWindowController: NSWindowController {
             languageTitle, languagePopup,
             launchAtLoginCheckbox,
             autoUpdateCheckbox, checkUpdateButton, updateHint,
+            quickCopyCheckbox,
+            historyTitle, historyCheckbox,
+            historyLimitTitle, historyLimitField,
+            historyLocationTitle, historyLocationLabel, chooseHistoryLocationButton, historyHint,
             hotKeyTitle, recorder, restore, hint,
             translationTitle, translationPopup, translationHint,
             permissionLabel, permissionButton
@@ -137,8 +215,33 @@ final class SettingsWindowController: NSWindowController {
             updateHint.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
             updateHint.topAnchor.constraint(equalTo: autoUpdateCheckbox.bottomAnchor, constant: 10),
 
+            quickCopyCheckbox.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
+            quickCopyCheckbox.topAnchor.constraint(equalTo: updateHint.bottomAnchor, constant: 18),
+
+            historyTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            historyTitle.topAnchor.constraint(equalTo: quickCopyCheckbox.bottomAnchor, constant: 28),
+            historyCheckbox.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
+            historyCheckbox.centerYAnchor.constraint(equalTo: historyTitle.centerYAnchor),
+
+            historyLimitTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            historyLimitTitle.topAnchor.constraint(equalTo: historyTitle.bottomAnchor, constant: 18),
+            historyLimitField.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
+            historyLimitField.centerYAnchor.constraint(equalTo: historyLimitTitle.centerYAnchor),
+            historyLimitField.widthAnchor.constraint(equalToConstant: 72),
+
+            historyLocationTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            historyLocationTitle.topAnchor.constraint(equalTo: historyLimitTitle.bottomAnchor, constant: 18),
+            historyLocationLabel.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
+            historyLocationLabel.centerYAnchor.constraint(equalTo: historyLocationTitle.centerYAnchor),
+            historyLocationLabel.widthAnchor.constraint(equalToConstant: 250),
+            chooseHistoryLocationButton.leadingAnchor.constraint(equalTo: historyLocationLabel.trailingAnchor, constant: 10),
+            chooseHistoryLocationButton.centerYAnchor.constraint(equalTo: historyLocationLabel.centerYAnchor),
+            historyHint.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            historyHint.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
+            historyHint.topAnchor.constraint(equalTo: historyLocationTitle.bottomAnchor, constant: 10),
+
             hotKeyTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            hotKeyTitle.topAnchor.constraint(equalTo: updateHint.bottomAnchor, constant: 30),
+            hotKeyTitle.topAnchor.constraint(equalTo: historyHint.bottomAnchor, constant: 28),
             recorder.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
             recorder.centerYAnchor.constraint(equalTo: hotKeyTitle.centerYAnchor),
             recorder.widthAnchor.constraint(equalToConstant: 220),
@@ -234,6 +337,18 @@ final class SettingsWindowController: NSWindowController {
         return label
     }
 
+    private func historyLimitFormatter() -> NumberFormatter {
+        let formatter = NumberFormatter()
+        formatter.minimum = 1
+        formatter.maximum = 200
+        formatter.allowsFloats = false
+        return formatter
+    }
+
+    private func historyLocationText() -> String {
+        CaptureHistoryPreferences.directoryURL.path
+    }
+
     private func configureLanguagePopup() {
         languagePopup.removeAllItems()
         for language in AppLanguage.allCases {
@@ -293,6 +408,33 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func toggleAutoUpdateCheck() {
         UpdateChecker.autoCheckEnabled = autoUpdateCheckbox.state == .on
+    }
+
+    @objc private func toggleQuickCopyOnConfirm() {
+        CapturePreferences.quickCopyOnConfirm = quickCopyCheckbox.state == .on
+    }
+
+    @objc private func toggleHistory() {
+        CaptureHistoryPreferences.isEnabled = historyCheckbox.state == .on
+    }
+
+    @objc private func changeHistoryLimit() {
+        CaptureHistoryPreferences.maximumCount = Int(historyLimitField.integerValue)
+        historyLimitField.stringValue = "\(CaptureHistoryPreferences.maximumCount)"
+    }
+
+    @objc private func chooseHistoryLocation() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = CaptureHistoryPreferences.directoryURL
+        panel.beginSheetModal(for: window!) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            CaptureHistoryPreferences.setDirectoryURL(url)
+            self?.historyLocationLabel.stringValue = self?.historyLocationText() ?? url.path
+        }
     }
 
     @objc private func checkForUpdates() {
@@ -397,7 +539,7 @@ final class UpdateChecker {
         }
     }
 
-    private let apiURL = URL(string: "https://api.github.com/repos/MustangYM/LongScreenShot/releases/latest")!
+    private let releasesAPIURL = URL(string: "https://api.github.com/repos/MustangYM/LongScreenShot/releases?per_page=30")!
     private let fallbackURL = URL(string: "https://github.com/MustangYM/LongScreenShot/releases")!
     private var isChecking = false
 
@@ -419,11 +561,12 @@ final class UpdateChecker {
         }
 
         isChecking = true
-        var request = URLRequest(url: apiURL)
+        var request = URLRequest(url: releasesAPIURL)
         request.timeoutInterval = 12
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("LongScreenShot/\(currentVersion().description)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -438,23 +581,29 @@ final class UpdateChecker {
 
         if let error {
             if userInitiated {
-                showMessage(title: L10n.tr("update.failedTitle"), message: error.localizedDescription)
+                showUpdateCheckFailed(message: error.localizedDescription)
             }
             return
         }
 
-        guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode),
-              let data else {
+        guard let http = response as? HTTPURLResponse, let data else {
             if userInitiated {
-                showMessage(title: L10n.tr("update.failedTitle"), message: L10n.tr("update.failedMessage"))
+                showUpdateCheckFailed(message: L10n.tr("update.failedMessage"))
+            }
+            return
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            if userInitiated {
+                showUpdateCheckFailed(message: "HTTP \(http.statusCode)")
             }
             return
         }
 
         do {
-            let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
-            guard !release.draft, !release.prerelease else {
+            let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
+            let stableReleases = releases.filter { !$0.draft && !$0.prerelease }
+            guard let release = stableReleases.max(by: { Version($0.tagName) < Version($1.tagName) }) else {
                 if userInitiated { showUpToDate() }
                 return
             }
@@ -468,7 +617,7 @@ final class UpdateChecker {
             }
         } catch {
             if userInitiated {
-                showMessage(title: L10n.tr("update.failedTitle"), message: error.localizedDescription)
+                showUpdateCheckFailed(message: error.localizedDescription)
             }
         }
     }
@@ -499,11 +648,23 @@ final class UpdateChecker {
         )
     }
 
+    private func showUpdateCheckFailed(message: String) {
+        let alert = NSAlert()
+        alert.messageText = L10n.tr("update.failedTitle")
+        alert.informativeText = message.isEmpty ? L10n.tr("update.failedMessage") : message
+        alert.addButton(withTitle: L10n.tr("update.openRelease"))
+        alert.addButton(withTitle: L10n.tr("common.ok"))
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(fallbackURL)
+        }
+    }
+
     private func showMessage(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: L10n.tr("common.ok"))
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }

@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import CoreImage
 import ImageIO
 import Vision
@@ -228,6 +229,963 @@ enum ImageExporter {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
         return "LongScreenShot \(formatter.string(from: Date())).png"
+    }
+}
+
+
+enum CapturePreferences {
+    private static let quickCopyKey = "quickCopyOnConfirm"
+
+    static var quickCopyOnConfirm: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: quickCopyKey) == nil { return true }
+            return UserDefaults.standard.bool(forKey: quickCopyKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: quickCopyKey) }
+    }
+}
+
+struct CaptureHistoryItem: Equatable {
+    let url: URL
+    let date: Date
+    let width: Int
+    let height: Int
+}
+
+enum CaptureHistoryPreferences {
+    private enum Keys {
+        static let enabled = "captureHistoryEnabled"
+        static let maximumCount = "captureHistoryMaximumCount"
+        static let directoryPath = "captureHistoryDirectoryPath"
+    }
+
+    static var isEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: Keys.enabled) == nil { return true }
+            return UserDefaults.standard.bool(forKey: Keys.enabled)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.enabled) }
+    }
+
+    static var maximumCount: Int {
+        get {
+            let raw = UserDefaults.standard.integer(forKey: Keys.maximumCount)
+            return raw == 0 ? 50 : max(1, min(200, raw))
+        }
+        set { UserDefaults.standard.set(max(1, min(200, newValue)), forKey: Keys.maximumCount) }
+    }
+
+    static var directoryURL: URL {
+        if let path = UserDefaults.standard.string(forKey: Keys.directoryPath), !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return appSupport.appendingPathComponent("LongScreenShot/History", isDirectory: true)
+    }
+
+    static func setDirectoryURL(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: Keys.directoryPath)
+    }
+}
+
+final class CaptureHistoryManager {
+    static let shared = CaptureHistoryManager()
+    private let queue = DispatchQueue(label: "longscreenshot.capture.history", qos: .utility)
+    private let filenameFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        return formatter
+    }()
+
+    private init() {}
+
+    func record(_ image: CGImage) {
+        guard CaptureHistoryPreferences.isEnabled else { return }
+        let directory = CaptureHistoryPreferences.directoryURL
+        let maxCount = CaptureHistoryPreferences.maximumCount
+        let width = image.width
+        let height = image.height
+        let date = Date()
+        let filename = "\(filenameFormatter.string(from: date))_\(width)x\(height)_\(UUID().uuidString.prefix(8)).png"
+        queue.async { [filenameFormatter] in
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let url = directory.appendingPathComponent(filename)
+                ImageExporter.writePNG(image, to: url)
+                self.trim(in: directory, maximumCount: maxCount)
+            } catch {
+                NSLog("LongScreenShot history save failed: \(error.localizedDescription)")
+            }
+            _ = filenameFormatter
+        }
+    }
+
+    func items() -> [CaptureHistoryItem] {
+        let directory = CaptureHistoryPreferences.directoryURL
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return urls
+            .filter { $0.pathExtension.lowercased() == "png" }
+            .compactMap(item(for:))
+            .sorted { $0.date > $1.date }
+    }
+
+    func delete(_ item: CaptureHistoryItem) {
+        try? FileManager.default.removeItem(at: item.url)
+    }
+
+    private func trim(in directory: URL, maximumCount: Int) {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let all = urls
+            .filter { $0.pathExtension.lowercased() == "png" }
+            .compactMap(item(for:))
+            .sorted { $0.date > $1.date }
+        guard all.count > maximumCount else { return }
+        for item in all.dropFirst(maximumCount) {
+            try? FileManager.default.removeItem(at: item.url)
+        }
+    }
+
+    private func item(for url: URL) -> CaptureHistoryItem? {
+        guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
+        let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        let date = values?.creationDate ?? values?.contentModificationDate ?? Date.distantPast
+        let size = imagePixelSize(url: url) ?? parseSize(from: url.lastPathComponent) ?? .zero
+        return CaptureHistoryItem(url: url, date: date, width: Int(size.width), height: Int(size.height))
+    }
+
+    private func imagePixelSize(url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
+        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        guard width > 0, height > 0 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
+    private func parseSize(from filename: String) -> CGSize? {
+        guard let match = filename.range(of: #"_\d+x\d+_"#, options: .regularExpression) else { return nil }
+        let token = filename[match].dropFirst().dropLast()
+        let parts = token.split(separator: "x")
+        guard parts.count == 2, let width = Int(parts[0]), let height = Int(parts[1]) else { return nil }
+        return CGSize(width: width, height: height)
+    }
+}
+
+
+final class FeedbackToast {
+    private static var activePanels: [NSPanel] = []
+
+    /// 显示反馈 Toast
+    ///
+    /// - Parameters:
+    ///   - message: Toast 文案
+    ///   - screen: 明确指定的目标屏幕。推荐从“截图开始时的屏幕”缓存后传入。
+    ///   - anchorRect: 操作区域的全局屏幕坐标。注意：不是 view 内部坐标。
+    static func show(_ message: String, screen: NSScreen? = nil, anchorRect: CGRect? = nil) {
+        if Thread.isMainThread {
+            showOnMain(message, screen: screen, anchorRect: anchorRect)
+        } else {
+            DispatchQueue.main.async {
+                showOnMain(message, screen: screen, anchorRect: anchorRect)
+            }
+        }
+    }
+
+    private static func showOnMain(_ message: String, screen: NSScreen?, anchorRect: CGRect?) {
+        let targetScreen =
+            anchorRect.flatMap { screenContainingMost(of: $0) }
+            ?? screen
+            ?? screenContainingPoint(NSEvent.mouseLocation)
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+
+        let visible = targetScreen?.visibleFrame
+            ?? targetScreen?.frame
+            ?? NSRect(x: 0, y: 0, width: 900, height: 600)
+
+        let label = NSTextField(labelWithString: message)
+        label.font = .systemFont(ofSize: 14, weight: .semibold)
+        label.textColor = .white
+        label.alignment = .center
+        label.backgroundColor = .clear
+        label.isBezeled = false
+        label.isEditable = false
+        label.isSelectable = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let measured = (message as NSString).size(withAttributes: [.font: label.font as Any])
+        let size = NSSize(width: max(176, measured.width + 46), height: 44)
+
+        // 关键点：
+        // Toast 永远放到目标屏幕 visibleFrame 的正中心。
+        // 不再使用 anchorRect 的中心作为弹窗位置，否则选区靠边或跨屏时会偏。
+        let frame = NSRect(
+            x: visible.midX - size.width / 2,
+            y: visible.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 14
+        container.layer?.masksToBounds = true
+        container.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.76).cgColor
+        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        container.layer?.borderWidth = 1
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+
+        let panel = NSPanel(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false,
+            screen: targetScreen
+        )
+
+        // 再 setFrame 一次，避免 NSPanel 初始化时被 AppKit 根据 screen/space 做隐式修正。
+        panel.setFrame(frame, display: false)
+
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 8)
+        panel.ignoresMouseEvents = true
+        panel.isReleasedWhenClosed = false
+        panel.contentView = container
+
+        // 不要加 .canJoinAllSpaces。
+        // 多显示器 + 分屏/全屏 Space 下，它很容易导致 panel 被系统放到别的屏幕或别的 Space。
+        panel.collectionBehavior = [
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle
+        ]
+
+        activePanels.append(panel)
+
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            panel.animator().alphaValue = 1
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.05) {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                panel.animator().alphaValue = 0
+            } completionHandler: {
+                panel.orderOut(nil)
+                activePanels.removeAll { $0 === panel }
+            }
+        }
+    }
+
+    /// 找到和某个全局屏幕坐标 rect 重叠面积最大的屏幕。
+    /// 比只判断 center 更稳，因为截图选区可能跨屏，也可能刚好贴着屏幕边缘。
+    private static func screenContainingMost(of rect: CGRect) -> NSScreen? {
+        guard !rect.isNull, !rect.isEmpty else { return nil }
+
+        let best = NSScreen.screens
+            .map { screen -> (screen: NSScreen, area: CGFloat) in
+                let intersection = screen.frame.intersection(rect)
+                return (screen, area(of: intersection))
+            }
+            .filter { $0.area > 0 }
+            .max { lhs, rhs in
+                lhs.area < rhs.area
+            }
+
+        if let best {
+            return best.screen
+        }
+
+        return screenContainingPoint(CGPoint(x: rect.midX, y: rect.midY))
+    }
+
+    private static func screenContainingPoint(_ point: CGPoint) -> NSScreen? {
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) {
+            return screen
+        }
+
+        // 如果 point 落在屏幕之间的空隙里，取最近的屏幕。
+        return NSScreen.screens.min { lhs, rhs in
+            distance(from: point, to: lhs.frame) < distance(from: point, to: rhs.frame)
+        }
+    }
+
+    private static func area(of rect: CGRect) -> CGFloat {
+        guard !rect.isNull, !rect.isEmpty else { return 0 }
+        return max(0, rect.width) * max(0, rect.height)
+    }
+
+    private static func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        let clampedX = min(max(point.x, rect.minX), rect.maxX)
+        let clampedY = min(max(point.y, rect.minY), rect.maxY)
+        let dx = point.x - clampedX
+        let dy = point.y - clampedY
+        return dx * dx + dy * dy
+    }
+}
+
+private final class CaptureHistoryRootView: NSVisualEffectView {
+    var onCopy: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "c" {
+            onCopy?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
+final class CaptureHistoryWindowController: NSWindowController {
+    static let shared = CaptureHistoryWindowController()
+
+    private let rootView = CaptureHistoryRootView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let scrollView = NSScrollView()
+    private let historyContentView = NSView()
+    private let emptyLabel = NSTextField(labelWithString: "")
+    private var selectedItem: CaptureHistoryItem?
+    private var cardViews: [CaptureHistoryCardView] = []
+
+    private init() {
+        let screen = Self.screenUnderPointer() ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let width = min(980, max(560, visible.width * 0.78))
+        let height: CGFloat = 360
+        let frame = NSRect(x: visible.midX - width / 2, y: visible.midY - height / 2, width: width, height: height)
+        let panel = NSPanel(
+            contentRect: frame,
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false,
+            screen: screen
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+        super.init(window: panel)
+        buildUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func showAtPointer() {
+        positionAtPointerScreen()
+        reload()
+        guard let window else { return }
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.level = .floating
+        NSApp.activate(ignoringOtherApps: true)
+        showWindow(nil)
+        window.orderFrontRegardless()
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(rootView)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(self.rootView)
+        }
+    }
+
+    private func buildUI() {
+        guard let content = window?.contentView else { return }
+        rootView.material = .hudWindow
+        rootView.blendingMode = .behindWindow
+        rootView.state = .active
+        rootView.wantsLayer = true
+        rootView.layer?.cornerRadius = 18
+        rootView.layer?.masksToBounds = true
+        rootView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(rootView)
+        rootView.onCopy = { [weak self] in self?.copySelectedItem() }
+
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(titleLabel)
+
+        historyContentView.frame = NSRect(x: 0, y: 0, width: 1, height: 252)
+        historyContentView.autoresizesSubviews = false
+
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = true
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = historyContentView
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(scrollView)
+
+        emptyLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(emptyLabel)
+
+        NSLayoutConstraint.activate([
+            rootView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            rootView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            rootView.topAnchor.constraint(equalTo: content.topAnchor),
+            rootView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 88),
+            titleLabel.topAnchor.constraint(equalTo: rootView.topAnchor, constant: 18),
+            scrollView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 14),
+            scrollView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -14),
+            scrollView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+            scrollView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -16),
+            emptyLabel.centerXAnchor.constraint(equalTo: rootView.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: rootView.centerYAnchor)
+        ])
+    }
+
+    private func reload() {
+        titleLabel.stringValue = L10n.tr("history.title")
+        window?.title = L10n.tr("history.title")
+        emptyLabel.stringValue = L10n.tr("history.empty")
+        historyContentView.subviews.forEach { $0.removeFromSuperview() }
+        cardViews.removeAll()
+        let items = CaptureHistoryManager.shared.items()
+        if let selectedItem, !items.contains(selectedItem) {
+            self.selectedItem = items.first
+        } else if selectedItem == nil {
+            selectedItem = items.first
+        }
+        emptyLabel.isHidden = !items.isEmpty
+        scrollView.isHidden = items.isEmpty
+
+        let cardWidth: CGFloat = 210
+        let cardHeight: CGFloat = 252
+        let spacing: CGFloat = 16
+        let inset: CGFloat = 14
+        let contentWidth = max(1, inset * 2 + CGFloat(items.count) * cardWidth + CGFloat(max(0, items.count - 1)) * spacing)
+        historyContentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: cardHeight)
+
+        for (index, item) in items.enumerated() {
+            let card = CaptureHistoryCardView(
+                item: item,
+                onSelect: { [weak self] selected in self?.selectItem(selected) },
+                onDelete: { [weak self] deleted in
+                    guard let self else { return }
+                    CaptureHistoryManager.shared.delete(deleted)
+                    if self.selectedItem == deleted { self.selectedItem = nil }
+                    FeedbackToast.show(L10n.tr("history.deleted"), screen: self.window?.screen, anchorRect: self.window?.frame)
+                    self.reload()
+                }
+            )
+            card.frame = NSRect(
+                x: inset + CGFloat(index) * (cardWidth + spacing),
+                y: 0,
+                width: cardWidth,
+                height: cardHeight
+            )
+            card.isSelected = item == selectedItem
+            historyContentView.addSubview(card)
+            cardViews.append(card)
+        }
+    }
+
+    private func selectItem(_ item: CaptureHistoryItem) {
+        selectedItem = item
+        cardViews.forEach { $0.isSelected = $0.item == item }
+        window?.makeFirstResponder(rootView)
+    }
+
+    private func copySelectedItem() {
+        guard let item = selectedItem,
+              let image = CGImageSourceCreateWithURL(item.url as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) else {
+            NSSound.beep()
+            return
+        }
+        ImageExporter.copyToPasteboard(image)
+        FeedbackToast.show(L10n.tr("feedback.copied"), screen: window?.screen, anchorRect: window?.frame)
+    }
+
+    private func positionAtPointerScreen() {
+        guard let window, let screen = Self.screenUnderPointer() ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let width = min(980, max(560, visible.width * 0.78))
+        let height: CGFloat = 360
+        window.setFrame(
+            NSRect(x: visible.midX - width / 2, y: visible.midY - height / 2, width: width, height: height),
+            display: false
+        )
+    }
+
+    private static func screenUnderPointer() -> NSScreen? {
+        let point = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(point) }
+    }
+}
+
+private final class CaptureHistoryCardView: NSView {
+    let item: CaptureHistoryItem
+    private let onSelect: (CaptureHistoryItem) -> Void
+    private let onDelete: (CaptureHistoryItem) -> Void
+    private var isDeleting = false
+
+    var isSelected: Bool = false {
+        didSet { updateSelectionAppearance(animated: oldValue != isSelected) }
+    }
+
+    init(
+        item: CaptureHistoryItem,
+        onSelect: @escaping (CaptureHistoryItem) -> Void,
+        onDelete: @escaping (CaptureHistoryItem) -> Void
+    ) {
+        self.item = item
+        self.onSelect = onSelect
+        self.onDelete = onDelete
+        super.init(frame: .zero)
+        buildUI()
+        updateSelectionAppearance(animated: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func mouseDown(with event: NSEvent) {
+        guard !isDeleting else { return }
+        onSelect(item)
+        if event.clickCount >= 2,
+           let image = CGImageSourceCreateWithURL(item.url as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) {
+            ImageExporter.copyToPasteboard(image)
+            FeedbackToast.show(L10n.tr("feedback.copied"), screen: window?.screen, anchorRect: window?.frame)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard !isDeleting else { return }
+        onSelect(item)
+        let menu = NSMenu()
+        let showItem = NSMenuItem(title: L10n.tr("history.showInFinder"), action: #selector(showInFinder), keyEquivalent: "")
+        showItem.target = self
+        menu.addItem(showItem)
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    private func buildUI() {
+        wantsLayer = true
+        layer?.cornerRadius = 16
+        layer?.masksToBounds = false
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.84).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        layer?.borderWidth = 1
+        shadow = NSShadow()
+        shadow?.shadowBlurRadius = 0
+        shadow?.shadowOffset = .zero
+        shadow?.shadowColor = .clear
+
+        let imageView = NSImageView()
+        imageView.image = thumbnailImage(url: item.url, maxPixelSize: 420)
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.wantsLayer = true
+        imageView.layer?.cornerRadius = 12
+        imageView.layer?.masksToBounds = true
+        imageView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.16).cgColor
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+
+        let info = NSTextField(labelWithString: "\(item.width) × \(item.height) · \(relativeTime(for: item.date))")
+        info.font = .systemFont(ofSize: 12, weight: .medium)
+        info.textColor = .secondaryLabelColor
+        info.alignment = .center
+        info.lineBreakMode = .byTruncatingTail
+        info.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(info)
+
+        let deleteButton = NSButton(title: "×", target: self, action: #selector(deleteItem))
+        deleteButton.toolTip = L10n.tr("history.delete")
+        deleteButton.isBordered = false
+        deleteButton.font = .systemFont(ofSize: 18, weight: .bold)
+        deleteButton.contentTintColor = .white
+        deleteButton.wantsLayer = true
+        deleteButton.layer?.cornerRadius = 11
+        deleteButton.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.52).cgColor
+        deleteButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(deleteButton)
+
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            imageView.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            imageView.bottomAnchor.constraint(equalTo: info.topAnchor, constant: -9),
+            info.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            info.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            info.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11),
+            info.heightAnchor.constraint(equalToConstant: 18),
+            deleteButton.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            deleteButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            deleteButton.widthAnchor.constraint(equalToConstant: 22),
+            deleteButton.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    @objc private func deleteItem() {
+        guard !isDeleting else { return }
+        isDeleting = true
+        onSelect(item)
+        explodeAndDelete { [weak self] in
+            guard let self else { return }
+            self.onDelete(self.item)
+        }
+    }
+
+    @objc private func showInFinder() {
+        guard !isDeleting else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    /// 高级删除动画：
+    /// 1. 先把整张卡片截图成一张快照；
+    /// 2. 把快照切成多个碎片；
+    /// 3. 原卡片隐藏，碎片从原位置向外爆开、旋转、缩小并淡出；
+    /// 4. 动画结束后再真正删除文件并刷新历史列表。
+    private func explodeAndDelete(completion: @escaping () -> Void) {
+        guard let container = superview,
+              let snapshot = snapshotForExplosion(),
+              bounds.width > 4,
+              bounds.height > 4 else {
+            fallbackDeleteAnimation(completion: completion)
+            return
+        }
+
+        layoutSubtreeIfNeeded()
+        container.wantsLayer = true
+        guard let containerLayer = container.layer else {
+            fallbackDeleteAnimation(completion: completion)
+            return
+        }
+
+        let sourceFrame = frame
+        let overlayLayer = CALayer()
+        overlayLayer.frame = sourceFrame
+        overlayLayer.masksToBounds = false
+        overlayLayer.zPosition = 9999
+        containerLayer.addSublayer(overlayLayer)
+
+        addImpactFlash(to: overlayLayer)
+        addShockwave(to: overlayLayer)
+        addGlowBurst(to: overlayLayer)
+
+        // 原卡片立刻隐藏，视觉上由碎片层接管。
+        alphaValue = 0
+
+        let columns = 7
+        let rows = 6
+        let pieceWidth = bounds.width / CGFloat(columns)
+        let pieceHeight = bounds.height / CGFloat(rows)
+        let pixelScaleX = CGFloat(snapshot.width) / max(1, bounds.width)
+        let pixelScaleY = CGFloat(snapshot.height) / max(1, bounds.height)
+
+        var maxAnimationTime: TimeInterval = 0.0
+
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let viewRect = CGRect(
+                    x: CGFloat(column) * pieceWidth,
+                    y: CGFloat(row) * pieceHeight,
+                    width: column == columns - 1 ? bounds.width - CGFloat(column) * pieceWidth : pieceWidth,
+                    height: row == rows - 1 ? bounds.height - CGFloat(row) * pieceHeight : pieceHeight
+                ).integral
+
+                guard viewRect.width > 0, viewRect.height > 0 else { continue }
+
+                let cropRect = CGRect(
+                    x: viewRect.minX * pixelScaleX,
+                    y: CGFloat(snapshot.height) - viewRect.maxY * pixelScaleY,
+                    width: viewRect.width * pixelScaleX,
+                    height: viewRect.height * pixelScaleY
+                ).integral
+
+                guard let shardImage = snapshot.cropping(to: cropRect) else { continue }
+
+                let shardLayer = CALayer()
+                shardLayer.contents = shardImage
+                shardLayer.contentsGravity = .resize
+                shardLayer.frame = viewRect
+                shardLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+                shardLayer.position = CGPoint(x: viewRect.midX, y: viewRect.midY)
+                shardLayer.shadowColor = NSColor.black.cgColor
+                shardLayer.shadowOpacity = 0.22
+                shardLayer.shadowRadius = 7
+                shardLayer.shadowOffset = CGSize(width: 0, height: -2)
+                shardLayer.shouldRasterize = true
+                shardLayer.rasterizationScale = NSScreen.main?.backingScaleFactor ?? 2
+                overlayLayer.addSublayer(shardLayer)
+
+                let seed = CGFloat(row * columns + column + 1)
+                let jitterX = (noise(seed * 3.7) - 0.5) * 72
+                let jitterY = (noise(seed * 8.9) - 0.5) * 62
+                let center = CGPoint(x: viewRect.midX, y: viewRect.midY)
+                var vector = CGPoint(x: center.x - bounds.midX, y: center.y - bounds.midY)
+                let length = max(1, sqrt(vector.x * vector.x + vector.y * vector.y))
+                vector.x /= length
+                vector.y /= length
+
+                let blastPower = 96 + noise(seed * 13.1) * 92
+                let endPosition = CGPoint(
+                    x: shardLayer.position.x + vector.x * blastPower + jitterX,
+                    y: shardLayer.position.y + vector.y * blastPower + jitterY
+                )
+
+                let delay = TimeInterval(noise(seed * 2.1) * 0.075)
+                let duration = TimeInterval(0.56 + noise(seed * 5.3) * 0.22)
+                maxAnimationTime = max(maxAnimationTime, delay + duration)
+
+                let positionAnimation = CABasicAnimation(keyPath: "position")
+                positionAnimation.fromValue = NSValue(point: shardLayer.position)
+                positionAnimation.toValue = NSValue(point: endPosition)
+
+                let opacityAnimation = CABasicAnimation(keyPath: "opacity")
+                opacityAnimation.fromValue = 1.0
+                opacityAnimation.toValue = 0.0
+
+                let scaleAnimation = CABasicAnimation(keyPath: "transform.scale")
+                scaleAnimation.fromValue = 1.0
+                scaleAnimation.toValue = 0.18 + noise(seed * 7.7) * 0.16
+
+                let rotationAnimation = CABasicAnimation(keyPath: "transform.rotation.z")
+                rotationAnimation.fromValue = 0
+                rotationAnimation.toValue = (noise(seed * 11.3) - 0.5) * CGFloat.pi * 2.8
+
+                let group = CAAnimationGroup()
+                group.animations = [
+                    positionAnimation,
+                    opacityAnimation,
+                    scaleAnimation,
+                    rotationAnimation
+                ]
+                group.beginTime = CACurrentMediaTime() + delay
+                group.duration = duration
+                group.timingFunction = CAMediaTimingFunction(controlPoints: 0.12, 0.82, 0.18, 1.0)
+                group.fillMode = .forwards
+                group.isRemovedOnCompletion = false
+                shardLayer.add(group, forKey: "premiumExplosion")
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + maxAnimationTime + 0.06) { [weak overlayLayer] in
+            overlayLayer?.removeFromSuperlayer()
+            completion()
+        }
+    }
+
+    private func fallbackDeleteAnimation(completion: @escaping () -> Void) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            animator().alphaValue = 0
+            animator().frame = frame.insetBy(dx: 14, dy: 18)
+        } completionHandler: {
+            completion()
+        }
+    }
+
+    private func snapshotForExplosion() -> CGImage? {
+        layoutSubtreeIfNeeded()
+        guard bounds.width > 2, bounds.height > 2,
+              let rep = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        rep.size = bounds.size
+        cacheDisplay(in: bounds, to: rep)
+        return rep.cgImage
+    }
+
+    private func addImpactFlash(to overlayLayer: CALayer) {
+        let flashLayer = CALayer()
+        flashLayer.frame = bounds
+        flashLayer.cornerRadius = 16
+        flashLayer.backgroundColor = NSColor.white.withAlphaComponent(0.72).cgColor
+        flashLayer.opacity = 0
+        overlayLayer.addSublayer(flashLayer)
+
+        let opacityAnimation = CAKeyframeAnimation(keyPath: "opacity")
+        opacityAnimation.values = [0.0, 0.92, 0.0]
+        opacityAnimation.keyTimes = [0.0, 0.22, 1.0]
+        opacityAnimation.duration = 0.18
+        opacityAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        flashLayer.add(opacityAnimation, forKey: "impactFlash")
+    }
+
+    private func addShockwave(to overlayLayer: CALayer) {
+        let waveLayer = CAShapeLayer()
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let startRadius: CGFloat = 18
+        let endRadius = max(bounds.width, bounds.height) * 0.68
+
+        waveLayer.path = CGPath(ellipseIn: CGRect(
+            x: center.x - startRadius,
+            y: center.y - startRadius,
+            width: startRadius * 2,
+            height: startRadius * 2
+        ), transform: nil)
+        waveLayer.fillColor = NSColor.clear.cgColor
+        waveLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.92).cgColor
+        waveLayer.lineWidth = 2.5
+        waveLayer.opacity = 0.92
+        waveLayer.shadowColor = NSColor.controlAccentColor.cgColor
+        waveLayer.shadowOpacity = 0.55
+        waveLayer.shadowRadius = 12
+        waveLayer.shadowOffset = .zero
+        overlayLayer.addSublayer(waveLayer)
+
+        let endPath = CGPath(ellipseIn: CGRect(
+            x: center.x - endRadius,
+            y: center.y - endRadius,
+            width: endRadius * 2,
+            height: endRadius * 2
+        ), transform: nil)
+
+        let pathAnimation = CABasicAnimation(keyPath: "path")
+        pathAnimation.fromValue = waveLayer.path
+        pathAnimation.toValue = endPath
+
+        let opacityAnimation = CABasicAnimation(keyPath: "opacity")
+        opacityAnimation.fromValue = 0.92
+        opacityAnimation.toValue = 0.0
+
+        let widthAnimation = CABasicAnimation(keyPath: "lineWidth")
+        widthAnimation.fromValue = 2.5
+        widthAnimation.toValue = 0.2
+
+        let group = CAAnimationGroup()
+        group.animations = [pathAnimation, opacityAnimation, widthAnimation]
+        group.duration = 0.46
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.fillMode = .forwards
+        group.isRemovedOnCompletion = false
+        waveLayer.add(group, forKey: "shockwave")
+    }
+
+    private func addGlowBurst(to overlayLayer: CALayer) {
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let sparkCount = 16
+
+        for index in 0..<sparkCount {
+            let seed = CGFloat(index + 1)
+            let angle = (CGFloat(index) / CGFloat(sparkCount)) * CGFloat.pi * 2 + (noise(seed * 4.2) - 0.5) * 0.42
+            let distance = 60 + noise(seed * 9.1) * 82
+            let length = 5 + noise(seed * 2.8) * 7
+            let thickness = 1.4 + noise(seed * 6.4) * 1.5
+            let delay = TimeInterval(noise(seed * 3.3) * 0.045)
+            let duration = TimeInterval(0.32 + noise(seed * 5.6) * 0.22)
+
+            let spark = CALayer()
+            spark.bounds = CGRect(x: 0, y: 0, width: length, height: thickness)
+            spark.position = center
+            spark.cornerRadius = thickness / 2
+            spark.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.95).cgColor
+            spark.shadowColor = NSColor.controlAccentColor.cgColor
+            spark.shadowOpacity = 0.8
+            spark.shadowRadius = 8
+            spark.shadowOffset = .zero
+            spark.transform = CATransform3DMakeRotation(angle, 0, 0, 1)
+            overlayLayer.addSublayer(spark)
+
+            let endPosition = CGPoint(
+                x: center.x + cos(angle) * distance,
+                y: center.y + sin(angle) * distance
+            )
+
+            let positionAnimation = CABasicAnimation(keyPath: "position")
+            positionAnimation.fromValue = NSValue(point: center)
+            positionAnimation.toValue = NSValue(point: endPosition)
+
+            let opacityAnimation = CABasicAnimation(keyPath: "opacity")
+            opacityAnimation.fromValue = 1.0
+            opacityAnimation.toValue = 0.0
+
+            let scaleAnimation = CABasicAnimation(keyPath: "transform.scale")
+            scaleAnimation.fromValue = 1.0
+            scaleAnimation.toValue = 0.12
+
+            let group = CAAnimationGroup()
+            group.animations = [positionAnimation, opacityAnimation, scaleAnimation]
+            group.beginTime = CACurrentMediaTime() + delay
+            group.duration = duration
+            group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            group.fillMode = .forwards
+            group.isRemovedOnCompletion = false
+            spark.add(group, forKey: "spark")
+        }
+    }
+
+    /// 轻量伪随机，避免每次刷新历史列表时动画完全一样，同时不需要额外状态。
+    private func noise(_ seed: CGFloat) -> CGFloat {
+        let raw = sin(seed * 12.9898 + CGFloat(item.url.path.hashValue % 997) * 0.001) * 43758.5453
+        return raw - floor(raw)
+    }
+
+    private func updateSelectionAppearance(animated: Bool) {
+        let changes = {
+            self.layer?.borderWidth = self.isSelected ? 2 : 1
+            self.layer?.borderColor = self.isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.95).cgColor
+                : NSColor.white.withAlphaComponent(0.18).cgColor
+            self.layer?.backgroundColor = self.isSelected
+                ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+                : NSColor.windowBackgroundColor.withAlphaComponent(0.84).cgColor
+            self.shadow?.shadowBlurRadius = self.isSelected ? 14 : 0
+            self.shadow?.shadowColor = self.isSelected ? NSColor.controlAccentColor.withAlphaComponent(0.38) : .clear
+        }
+        guard animated else { changes(); return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            changes()
+        }
+    }
+
+    private func thumbnailImage(url: URL, maxPixelSize: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+              ] as CFDictionary) else { return NSImage(contentsOf: url) }
+        return NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+    }
+
+    private func relativeTime(for date: Date) -> String {
+        let interval = max(0, Date().timeIntervalSince(date))
+        if interval < 60 { return L10n.tr("history.justNow") }
+        if interval < 3600 { return L10n.format("history.minutesAgo", Int(interval / 60)) }
+        if interval < 86400 { return L10n.format("history.hoursAgo", Int(interval / 3600)) }
+        if interval < 172800 { return L10n.tr("history.oneDayAgo") }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 }
 

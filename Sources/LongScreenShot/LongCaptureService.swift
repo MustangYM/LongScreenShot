@@ -970,6 +970,9 @@ final class LongCaptureService {
     // 这类帧只能“消费滚动位置”，不能继续推进 topOffset，否则底部会拼出重复内容。
     private var bottomNoVisualProgressCount = 0
     private var reachedVisualEnd = false
+    // v16：一旦连续静帧确认页面已经到底，后续向下滚动只消费滚轮，不再进入 matcher。
+    // 否则短页面/重复纹理页面会在到底后被弱 NCC 重新“恢复”，把底部旧内容重复拼到尾部。
+    private var reachedVisualEndScrollPosition: CGFloat = 0
     private var lastUnplacedAcceptedTail: PendingAcceptedTail?
 
     // ScreenCaptureKit 仍然以 60fps 捕获，但 matcher 不能按 60fps 逐帧处理。
@@ -999,7 +1002,441 @@ final class LongCaptureService {
         max(160, min(420, Int(CGFloat(frameHeight) * 0.20)))
     }
 
+    private func normalizedTopOffsetForCanvasPlacement(
+        rawTopOffset: Int,
+        frameHeight: Int,
+        contentHeight: Int,
+        sequence: Int
+    ) -> Int {
+        // v18：快速滚动恢复时，Vision/NCC 有时会给出“刚好越过当前画布尾部几像素”的 top。
+        // ScreenSnap 的 LongCanvas 本质是 contentMaxY append；这种 1~几十像素的小 gap
+        // 不应该让画布拒绝，否则 raw anchor 会跑到画布前面，后面就会一直 rejected，
+        // 表现为“长截图截到一半断掉”。这里把小 gap 夹回 contentHeight，宁可有极小重叠，
+        // 也不要让跟踪链从画布尾部断开。
+        let gap = rawTopOffset - contentHeight
+        guard gap > 0 else { return rawTopOffset }
+
+        let tolerance = max(12, min(56, Int(CGFloat(frameHeight) * 0.035)))
+        if gap <= tolerance {
+            LongCaptureDiagnostics.shared.log("canvas.clampTinyGap seq=\(sequence) rawTop=\(rawTopOffset) contentHeight=\(contentHeight) gap=\(gap) tolerance=\(tolerance)")
+            return contentHeight
+        }
+        return rawTopOffset
+    }
+
+    /// v21：到底后的重复追加有一个很稳定的特征：
+    /// 实际滚轮只多滚了一点点，但 matcher 算出来的新 tailGrowth 接近一整屏。
+    /// 这不是页面产生了新内容，而是底部回弹/重复纹理把旧尾巴错当成新帧。
+    /// 用 pxPerPoint 的弱先验只做“反作弊”判断：只拦截明显不可能的尾部增长，不影响正常快滚。
+    private func isImplausibleTailGrowthAfterSmallScroll(
+        tailGrowth: Int,
+        frameHeight: Int,
+        candidateScrollPosition: CGFloat,
+        contentHeight: Int
+    ) -> Bool {
+        guard tailGrowth > 0, frameHeight > 0 else { return false }
+        guard scrollPixelsPerPoint > 0.25 else { return false }
+
+        let scrollGap = max(0, candidateScrollPosition - acceptedScrollPosition)
+        guard scrollGap >= 1 else { return false }
+
+        let expectedGrowth = scrollGap * scrollPixelsPerPoint
+        let tailGrowthFloat = CGFloat(tailGrowth)
+        let frameFloat = CGFloat(frameHeight)
+
+        // 如果用户真的快滚了很多，不能用这个规则卡掉恢复。
+        // 只处理“滚轮增量不大，但图像却要追加大半屏”的底部重复特征。
+        guard scrollGap <= frameFloat * 0.55 else { return false }
+
+        let absoluteLargeTail = tailGrowthFloat >= frameFloat * 0.52
+        let muchLargerThanExpected = tailGrowthFloat >= max(expectedGrowth * 2.35 + 120, frameFloat * 0.48)
+        let alreadyLongEnough = contentHeight >= frameHeight * 3
+        return alreadyLongEnough && absoluteLargeTail && muchLargerThanExpected
+    }
+
+    /// v22：短滚动范围页面到底时，NCC 很容易在重复/相似行里找到一个“看起来很可靠”的较大 top。
+    /// 如果照常 append，会把底部已经出现过的一段再次追加，形成用户截图里的上下重叠。
+    /// 这类坏帧的特征是：
+    /// 1. 已经至少写过一段真实新增内容；
+    /// 2. 视觉变化极小；
+    /// 3. 本次滚轮增量只对应几十像素，但 matcher 要追加接近半屏的新尾巴。
+    /// 处理方式不是直接丢掉整帧，而是只把“按滚轮先验合理可能新增的最底部小尾巴”补上，
+    /// 然后立即锁定页面底部。这样既不会漏掉 Initial commit 这类最后一两行，也不会整段重复。
+    @discardableResult
+    private func appendConservativeShortRangeBottomTailIfNeeded(
+        result: FrameCandidateResult,
+        candidate: StreamFrameCandidate,
+        accumulator: LongCaptureCanvasAccumulator,
+        rawTopOffset: Int,
+        placementTopOffset: Int,
+        signature: FrameMatcher.FrameSignature?
+    ) -> Bool {
+        guard !finishRequested, !reachedVisualEnd else { return false }
+        let frameHeight = max(1, candidate.image.height)
+
+        // 只处理短可视区域/短滚动范围。长页面正常中段不能被这个规则提前锁死。
+        let shortViewport = selection.height <= 360 || frameHeight <= 720
+        guard shortViewport, accumulator.frameCount >= 2 else { return false }
+        guard accumulator.contentHeight <= frameHeight * 3 else { return false }
+
+        let tailGrowth = placementTopOffset + frameHeight - accumulator.contentHeight
+        guard tailGrowth > 0 else { return false }
+        guard tailGrowth >= max(96, Int(CGFloat(frameHeight) * 0.28)) else { return false }
+
+        let visualDelta = result.debug?.visualDelta ?? 255
+        guard visualDelta <= 4.5 else { return false }
+
+        let scrollGap = max(0, candidate.scrollPosition - acceptedScrollPosition)
+        guard scrollGap > 0, scrollGap <= CGFloat(frameHeight) * 0.45 else { return false }
+
+        let expectedGrowth: CGFloat
+        if scrollPixelsPerPoint > 0.25 {
+            expectedGrowth = scrollGap * scrollPixelsPerPoint
+        } else {
+            expectedGrowth = CGFloat(max(0, result.movementPixels))
+        }
+        guard expectedGrowth > 0 else { return false }
+
+        let tooLargeForScroll = CGFloat(tailGrowth) >= max(expectedGrowth * 2.0 + 64, CGFloat(frameHeight) * 0.38)
+        guard tooLargeForScroll else { return false }
+
+        let conservativeHeight = min(
+            tailGrowth,
+            max(48, min(Int(CGFloat(frameHeight) * 0.24), Int(expectedGrowth * 1.45 + 32)))
+        )
+        guard conservativeHeight > 0,
+              conservativeHeight <= tailGrowth - max(28, frameHeight / 12) else { return false }
+
+        let sourceStart = max(0, frameHeight - conservativeHeight)
+        let conservativeTop = max(accumulator.lastPlacedTopOffset, accumulator.contentHeight - sourceStart)
+        let placementResult = accumulator.place(
+            candidate.image,
+            topOffset: conservativeTop,
+            minimumStep: 0,
+            force: true,
+            signature: signature
+        )
+
+        switch placementResult {
+        case let .placed(actualSourceStart, actualSourceHeight):
+            let anchor = LongCaptureFrameAnchor(
+                image: candidate.image,
+                signature: signature,
+                topOffset: conservativeTop,
+                scrollPosition: candidate.scrollPosition
+            )
+            canvasAnchor = anchor
+            lastRawAnchor = anchor
+            lastUnplacedAcceptedTail = nil
+            acceptedOutputHeight = accumulator.contentHeight
+            acceptedFrameCount = accumulator.frameCount
+            previewStore?.place(
+                candidate.image,
+                topOffset: conservativeTop,
+                sourceStart: actualSourceStart,
+                sourceHeight: actualSourceHeight
+            )
+            schedulePreviewRender()
+            LongCaptureDiagnostics.shared.log("canvas.placeShortBottomTail seq=\(candidate.sequence) rawTop=\(rawTopOffset) normalTop=\(placementTopOffset) conservativeTop=\(conservativeTop) tailGrowth=\(tailGrowth) conservativeHeight=\(conservativeHeight) sourceStart=\(actualSourceStart) sourceHeight=\(actualSourceHeight) contentHeight=\(accumulator.contentHeight) scrollGap=\(String(format: "%.2f", Double(scrollGap))) expected=\(String(format: "%.2f", Double(expectedGrowth))) visual=\(String(format: "%.2f", visualDelta))")
+            lockReachedVisualEnd(
+                reason: "shortRangeConservativeTail",
+                candidate: candidate,
+                result: result,
+                contentHeight: accumulator.contentHeight
+            )
+            return true
+        case .skippedDuplicate:
+            LongCaptureDiagnostics.shared.log("canvas.shortBottomTailDuplicate seq=\(candidate.sequence) rawTop=\(rawTopOffset) normalTop=\(placementTopOffset) tailGrowth=\(tailGrowth)")
+            lockReachedVisualEnd(
+                reason: "shortRangeDuplicateTail",
+                candidate: candidate,
+                result: result,
+                contentHeight: accumulator.contentHeight
+            )
+            return true
+        case .skippedTooClose, .rejected:
+            LongCaptureDiagnostics.shared.log("canvas.shortBottomTailRejected seq=\(candidate.sequence) rawTop=\(rawTopOffset) conservativeTop=\(conservativeTop) tailGrowth=\(tailGrowth) conservativeHeight=\(conservativeHeight) result=\(placementResult)")
+            return false
+        }
+    }
+    private func lockReachedVisualEnd(
+        reason: String,
+        candidate: StreamFrameCandidate,
+        result: FrameCandidateResult?,
+        contentHeight: Int
+    ) {
+        reachedVisualEnd = true
+        reachedVisualEndScrollPosition = max(reachedVisualEndScrollPosition, candidate.scrollPosition)
+        bottomNoVisualProgressCount = max(bottomNoVisualProgressCount, 4)
+        trackingLost = false
+        consecutivePoorMatches = 0
+        fallbackCooldownFrames = 0
+        lastUnplacedAcceptedTail = nil
+        lastAcceptedSequence = max(lastAcceptedSequence, candidate.sequence)
+        acceptedScrollPosition = max(acceptedScrollPosition, candidate.scrollPosition)
+        lastQueuedScrollPosition = max(lastQueuedScrollPosition, candidate.scrollPosition)
+        if !pendingFrameQueue.isEmpty {
+            LongCaptureDiagnostics.shared.log("end.lock.dropQueue reason=\(reason) seq=\(candidate.sequence) dropped=\(pendingFrameQueue.count)")
+            pendingFrameQueue.removeAll()
+        }
+        let visualText = result?.debug.map { String(format: "%.2f", $0.visualDelta) } ?? "nil"
+        let localScoreText = LCFormatOptionalDouble(result?.debug?.localScore)
+        let localMarginText = LCFormatOptionalDouble(result?.debug?.localMargin)
+        LongCaptureDiagnostics.shared.log("end.lock reason=\(reason) seq=\(candidate.sequence) top=\(result?.topOffset ?? -1) move=\(result?.movementPixels ?? -1) contentHeight=\(contentHeight) frameHeight=\(candidate.image.height) scroll=\(String(format: "%.2f", Double(candidate.scrollPosition))) visual=\(visualText) score=\(localScoreText) margin=\(localMarginText)")
+        onStatus?("页面已到底，已锁定尾部，继续滚动不会追加重复内容", false)
+    }
+
+
+    /// v19：快速滚动丢锚时，不能只允许“完全 accepted”的帧写入画布。
+    /// 日志里出现过这种断链：弱帧虽然 NCC 没达到正式接受阈值，但它和当前画布尾部
+    /// 仍有几十像素真实 overlap；下一帧反而跳到 contentHeight 之后几百像素，被 canvas.rejectGap。
+    /// ScreenSnap 的 LongCanvas 只关心 contentMaxY append，这类“低 overlap 但可信”的恢复帧应该作为桥接段写入，
+    /// 否则 raw anchor 会一直在画布前方游离，表现为截图截到一半停止增长。
+    @discardableResult
+    private func promoteWeakOverlapBridgeIfNeeded(
+        result: FrameCandidateResult,
+        candidate: StreamFrameCandidate,
+        signature: FrameMatcher.FrameSignature?
+    ) -> Bool {
+        guard !finishRequested, !reachedVisualEnd else { return false }
+        guard result.poorMatch, result.movementPixels > 0 else { return false }
+        guard let accumulator = canvasAccumulator else { return false }
+
+        let frameHeight = max(1, candidate.image.height)
+        let contentHeight = accumulator.contentHeight
+
+        // v17 的短截图尾部锁定用于解决“到底后继续拖导致重复追加”。
+        // 这里的桥接只给真正长内容使用，避免把短图到底后的弱匹配再次写入画布。
+        guard contentHeight > frameHeight * 3, selection.height > 360 else { return false }
+
+        let rawTopOffset = min(
+            maximumOutputHeight - candidate.image.height,
+            max(0, result.topOffset)
+        )
+        guard rawTopOffset >= accumulator.lastPlacedTopOffset else { return false }
+
+        let nextHeight = rawTopOffset + frameHeight
+        let canvasOverlap = contentHeight - rawTopOffset
+        let tailGrowth = nextHeight - contentHeight
+
+        // 必须真的能从画布尾部继续追加：top 在 contentHeight 之前，并且会带来新内容。
+        guard tailGrowth > 0 else { return false }
+        guard canvasOverlap > 0 else { return false }
+
+        // v21：v19 的弱桥接能救“中途断链”，但它也会把网页底部回弹/重复尾巴
+        // 当成低重叠桥接写进去。底部重复的典型特征是：用户实际只滚了很小一段，
+        // 但 tailGrowth 接近一整屏。这里先用 pxPerPoint 反作弊拦掉这种不可能增长。
+        if isImplausibleTailGrowthAfterSmallScroll(
+            tailGrowth: tailGrowth,
+            frameHeight: frameHeight,
+            candidateScrollPosition: candidate.scrollPosition,
+            contentHeight: contentHeight
+        ) {
+            LongCaptureDiagnostics.shared.log("bridge.rejectBottomLike seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(contentHeight) canvasOverlap=\(canvasOverlap) tailGrowth=\(tailGrowth) scrollGap=\(String(format: "%.2f", Double(candidate.scrollPosition - acceptedScrollPosition))) pxPerPoint=\(String(format: "%.3f", Double(scrollPixelsPerPoint)))")
+            return false
+        }
+
+        // 这是“桥接低 overlap”，不是普通 accepted。
+        // overlap 太大时继续走正常 matcher；overlap 太小则风险太高。
+        let minimumBridgeOverlap = max(48, Int(CGFloat(frameHeight) * 0.04))
+        let maximumBridgeOverlap = max(minimumBridgeOverlap + 1, Int(CGFloat(frameHeight) * 0.22))
+        guard canvasOverlap >= minimumBridgeOverlap, canvasOverlap <= maximumBridgeOverlap else { return false }
+
+        let debug = result.debug
+        let localScore = debug?.localScore ?? 255.0
+        let localMargin = debug?.localMargin ?? 0.0
+        let anchorScore = debug?.anchorScore ?? 255.0
+        let anchorMargin = debug?.anchorMargin ?? 0.0
+        let visualDelta = debug?.visualDelta ?? 0.0
+        let localOverlap = debug?.localOverlap ?? 0
+        let anchorOverlap = debug?.anchorOverlap ?? 0
+        let bestOverlap = max(localOverlap, anchorOverlap)
+
+        let scoreLooksUsable = localScore <= 58.0 || anchorScore <= 58.0
+        let marginLooksUsable = localMargin >= 24.0 || anchorMargin >= 24.0
+        let enoughPatchOverlap = bestOverlap >= max(320, Int(CGFloat(frameHeight) * 0.28))
+
+        guard visualDelta >= 8.0, enoughPatchOverlap, (scoreLooksUsable || marginLooksUsable) else {
+            LongCaptureDiagnostics.shared.log("bridge.rejectWeak seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(contentHeight) canvasOverlap=\(canvasOverlap) tailGrowth=\(tailGrowth) visual=\(String(format: "%.2f", visualDelta)) score=\(String(format: "%.2f", localScore))/\(String(format: "%.2f", anchorScore)) margin=\(String(format: "%.2f", localMargin))/\(String(format: "%.2f", anchorMargin)) overlap=\(bestOverlap)")
+            return false
+        }
+
+        let bridgeAnchor = LongCaptureFrameAnchor(
+            image: candidate.image,
+            signature: signature,
+            topOffset: rawTopOffset,
+            scrollPosition: candidate.scrollPosition
+        )
+
+        let placementResult = accumulator.place(
+            candidate.image,
+            topOffset: rawTopOffset,
+            minimumStep: 0,
+            force: true,
+            signature: signature
+        )
+
+        switch placementResult {
+        case let .placed(sourceStart, sourceHeight):
+            lastRawAnchor = bridgeAnchor
+            canvasAnchor = bridgeAnchor
+            lastAcceptedSequence = candidate.sequence
+            acceptedScrollPosition = candidate.scrollPosition
+            lastQueuedScrollPosition = max(lastQueuedScrollPosition, candidate.scrollPosition)
+            trackingLost = false
+            consecutivePoorMatches = 0
+            bottomNoVisualProgressCount = 0
+            reachedVisualEnd = false
+            fallbackCooldownFrames = 0
+            lastUnplacedAcceptedTail = nil
+
+            previewStore?.place(
+                candidate.image,
+                topOffset: rawTopOffset,
+                sourceStart: sourceStart,
+                sourceHeight: sourceHeight
+            )
+            acceptedOutputHeight = accumulator.contentHeight
+            acceptedFrameCount = accumulator.frameCount
+            schedulePreviewRender()
+
+            LongCaptureDiagnostics.shared.log("canvas.placeWeakBridge seq=\(candidate.sequence) top=\(rawTopOffset) move=\(result.movementPixels) canvasOverlap=\(canvasOverlap) tailGrowth=\(tailGrowth) sourceStart=\(sourceStart) sourceHeight=\(sourceHeight) contentHeight=\(accumulator.contentHeight) frameCount=\(accumulator.frameCount) score=\(String(format: "%.2f", localScore))/\(String(format: "%.2f", anchorScore)) margin=\(String(format: "%.2f", localMargin))/\(String(format: "%.2f", anchorMargin)) visual=\(String(format: "%.2f", visualDelta))")
+            onStatus?("已用低重叠桥接帧恢复长截图…", false)
+            return true
+
+        case .skippedTooClose:
+            LongCaptureDiagnostics.shared.log("bridge.skipTooClose seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(accumulator.contentHeight) canvasOverlap=\(canvasOverlap)")
+            return false
+
+        case .skippedDuplicate:
+            LongCaptureDiagnostics.shared.log("bridge.skipDuplicate seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(accumulator.contentHeight) canvasOverlap=\(canvasOverlap)")
+            return false
+
+        case .rejected:
+            LongCaptureDiagnostics.shared.log("bridge.rejected seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(accumulator.contentHeight) canvasOverlap=\(canvasOverlap) tailGrowth=\(tailGrowth)")
+            return false
+        }
+    }
+
+    private func shouldLockVisualEndAfterRepeatedPoor(
+        result: FrameCandidateResult,
+        candidate: StreamFrameCandidate,
+        accumulator: LongCaptureCanvasAccumulator
+    ) -> Bool {
+        guard !finishRequested, !reachedVisualEnd else { return false }
+        guard result.poorMatch else { return false }
+
+        let frameHeight = max(1, candidate.image.height)
+        let contentHeight = accumulator.contentHeight
+        let visualDelta = result.debug?.visualDelta ?? Double.greatestFiniteMagnitude
+        guard visualDelta <= 9.5 else { return false }
+        guard consecutivePoorMatches >= 5 else { return false }
+
+        let predictedTop = max(0, result.topOffset)
+        let nextHeight = predictedTop + frameHeight
+        let canvasOverlap = contentHeight - predictedTop
+        let tailGrowth = nextHeight - contentHeight
+        guard tailGrowth > 0 else { return false }
+
+        // v20：v19 只对短截图启用“到底锁尾”，长图到底后继续往下滚时，
+        // 也会出现同一屏尾部被 NCC 当成新内容的情况：连续 poor、visualDelta 很低、
+        // top 卡在 contentHeight 附近，并且 tailGrowth 接近一整屏。
+        // 这不是正常中途恢复，而是页面已经到底后的重复尾巴，应立即锁住。
+        let shortTailSensitiveCapture = contentHeight <= frameHeight * 3 || selection.height <= 360
+        let scrolledPastAccepted = candidate.scrollPosition - acceptedScrollPosition
+        let unreliable = !(result.debug?.localReliable ?? false) && !(result.debug?.anchorReliable ?? false)
+        if shortTailSensitiveCapture {
+            let isTryingToExtendTail = nextHeight > contentHeight && canvasOverlap < Int(CGFloat(frameHeight) * 0.90)
+            guard isTryingToExtendTail else { return false }
+            return scrolledPastAccepted >= CGFloat(frameHeight) * 0.20 || unreliable
+        }
+
+        // 长图专用：只在强特征下锁尾，避免误伤中途丢锚恢复。
+        // v21：除了“贴近尾部 + 接近整屏”的旧规则，还加入“滚轮增量很小但
+        // tailGrowth 不可能地大”的规则，专门拦截网页底部回弹/继续拖动造成的重复追加。
+        let overlapRatio = CGFloat(max(0, canvasOverlap)) / CGFloat(frameHeight)
+        let growthRatio = CGFloat(tailGrowth) / CGFloat(frameHeight)
+        let almostFullScreenTailDuplicate =
+            canvasOverlap >= 0 &&
+            overlapRatio <= 0.18 &&
+            growthRatio >= 0.66 &&
+            scrolledPastAccepted >= CGFloat(frameHeight) * 0.14
+
+        let impossibleSmallScrollTail = isImplausibleTailGrowthAfterSmallScroll(
+            tailGrowth: tailGrowth,
+            frameHeight: frameHeight,
+            candidateScrollPosition: candidate.scrollPosition,
+            contentHeight: contentHeight
+        )
+
+        return almostFullScreenTailDuplicate || impossibleSmallScrollTail
+    }
+
+    private func shouldIgnoreAcceptedAfterBottomLikeRecovery(
+        result: FrameCandidateResult,
+        candidate: StreamFrameCandidate,
+        accumulator: LongCaptureCanvasAccumulator,
+        rawTopOffset: Int,
+        previousPoorCount: Int
+    ) -> Bool {
+        guard !finishRequested, !reachedVisualEnd else { return false }
+        guard previousPoorCount >= 5 || trackingLost else { return false }
+
+        let frameHeight = max(1, candidate.image.height)
+        let contentHeight = accumulator.contentHeight
+        let visualDelta = result.debug?.visualDelta ?? Double.greatestFiniteMagnitude
+        guard visualDelta <= 10.0 else { return false }
+
+        let nextHeight = rawTopOffset + frameHeight
+        let canvasOverlap = contentHeight - rawTopOffset
+        let tailGrowth = nextHeight - contentHeight
+        guard tailGrowth > 0 else { return false }
+
+        let shortTailSensitiveCapture = contentHeight <= frameHeight * 3 || selection.height <= 360
+        let overlapRatio = CGFloat(max(0, canvasOverlap)) / CGFloat(frameHeight)
+        let growthRatio = CGFloat(tailGrowth) / CGFloat(frameHeight)
+        let scrolledPastAccepted = candidate.scrollPosition - acceptedScrollPosition
+
+        if shortTailSensitiveCapture {
+            // v23：短可视区第一次真正滚动成功时，也可能先经历 1~2 次 poor，
+            // 然后才出现第一个 accepted。v22 在 frameCount==1 时就按“底部重复”锁尾，
+            // 会导致用户已经滚动了，但最终只输出第一屏。
+            // 所以这里必须先放过“第一段真实追加”。只有已经写入过至少一段新内容后，
+            // 才允许短图底部重复锁定规则生效。
+            guard accumulator.frameCount >= 2 else {
+                LongCaptureDiagnostics.shared.log("end.allowFirstShortRangeAppend seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(contentHeight) frameHeight=\(frameHeight) poorBefore=\(previousPoorCount) visual=\(String(format: "%.2f", visualDelta)) overlapRatio=\(String(format: "%.2f", Double(overlapRatio))) growthRatio=\(String(format: "%.2f", Double(growthRatio)))")
+                return false
+            }
+
+            // 到底后继续拖动时，弱纹理/NCC 会偶尔给出一个 accepted，但它通常只和现有画布
+            // 保持很小或中等 overlap，然后把同一屏底部当成新内容追加。
+            // 对短截图来说，连续 poor 后出现这种 accepted，宁可锁尾，也不要追加重复段。
+            return overlapRatio < 0.75 || scrolledPastAccepted >= CGFloat(frameHeight) * 0.65
+        }
+
+        // v21：长截图到底后也要挡住“低视觉变化 + 不可能的尾部增长”的 accepted。
+        // 这个判断比短图更严格，避免把正常中途恢复误判成到底。
+        let almostFullScreenTailDuplicate = canvasOverlap >= 0 &&
+            overlapRatio <= 0.18 &&
+            growthRatio >= 0.66 &&
+            scrolledPastAccepted >= CGFloat(frameHeight) * 0.14
+        let impossibleSmallScrollTail = isImplausibleTailGrowthAfterSmallScroll(
+            tailGrowth: tailGrowth,
+            frameHeight: frameHeight,
+            candidateScrollPosition: candidate.scrollPosition,
+            contentHeight: contentHeight
+        )
+        return almostFullScreenTailDuplicate || impossibleSmallScrollTail
+    }
+
     private func commitPendingTailIfNeeded(reason: String) {
+        if reachedVisualEnd {
+            if let pending = lastUnplacedAcceptedTail {
+                LongCaptureDiagnostics.shared.log("tail.rejectCommitAfterEnd reason=\(reason) seq=\(pending.sequence) endScroll=\(String(format: "%.2f", Double(reachedVisualEndScrollPosition)))")
+            }
+            lastUnplacedAcceptedTail = nil
+            return
+        }
         guard let pending = lastUnplacedAcceptedTail, let accumulator = canvasAccumulator else { return }
         let anchor = pending.anchor
         let tailGrowth = anchor.topOffset + anchor.image.height - accumulator.contentHeight
@@ -1056,6 +1493,13 @@ final class LongCaptureService {
     /// 卡在旧锚点上反复 nccRejected。
     @discardableResult
     private func promotePendingTailForRecoveryIfNeeded(reason: String) -> Bool {
+        if reachedVisualEnd {
+            if let pending = lastUnplacedAcceptedTail {
+                LongCaptureDiagnostics.shared.log("tail.promoteRejectAfterEnd reason=\(reason) seq=\(pending.sequence) endScroll=\(String(format: "%.2f", Double(reachedVisualEndScrollPosition)))")
+            }
+            lastUnplacedAcceptedTail = nil
+            return false
+        }
         guard let pending = lastUnplacedAcceptedTail, let accumulator = canvasAccumulator else { return false }
         let anchor = pending.anchor
         let tailGrowth = anchor.topOffset + anchor.image.height - accumulator.contentHeight
@@ -1201,6 +1645,7 @@ final class LongCaptureService {
         droppedBacklogFrameCount = 0
         bottomNoVisualProgressCount = 0
         reachedVisualEnd = false
+        reachedVisualEndScrollPosition = 0
         lastUnplacedAcceptedTail = nil
         lastFrameAttemptTime = Date.distantPast
         lastQueuedScrollPosition = 0
@@ -1339,6 +1784,22 @@ final class LongCaptureService {
 
         let now = Date()
         let measuredScroll = max(0, totalObservedScroll - lastQueuedScrollPosition)
+
+        // v16：已经确认到底后，继续向下滚动不会产生新内容，只会让弱纹理/NCC
+        // 在底部重复内容上反复找“新锚点”。直接消费滚轮并忽略帧，避免短图尾部重复。
+        if reachedVisualEnd, measuredScroll >= 0.5 {
+            lastQueuedScrollPosition = totalObservedScroll
+            acceptedScrollPosition = max(acceptedScrollPosition, totalObservedScroll)
+            trackingLost = false
+            consecutivePoorMatches = 0
+            fallbackCooldownFrames = 0
+            gatedFrameCount += 1
+            if gatedFrameCount <= 5 || gatedFrameCount % 30 == 0 {
+                LongCaptureDiagnostics.shared.log("receive.endLocked seq=\(sequence) measuredScroll=\(String(format: "%.2f", Double(measuredScroll))) totalScroll=\(String(format: "%.2f", Double(totalObservedScroll))) contentHeight=\(accumulator.contentHeight) endScroll=\(String(format: "%.2f", Double(reachedVisualEndScrollPosition)))")
+            }
+            return
+        }
+
         let elapsed = now.timeIntervalSince(lastFrameAttemptTime)
         // 不再把滚轮 delta 当作硬门槛。ScreenSnap 的做法是用它做弱先验。
         // 但我们的 Swift matcher 没有 ScreenSnap 的 vDSP 速度，采样频率必须贴合吞吐，
@@ -1570,6 +2031,25 @@ final class LongCaptureService {
             LongCaptureDiagnostics.shared.log("match.result seq=\(candidate.sequence) accepted=\(result.accepted) poorMatch=\(result.poorMatch) placeAllowed=\(result.allowCanvasPlacement) top=\(result.topOffset) move=\(result.movementPixels)")
         }
 
+        // v21：只要尾部已经锁定，所有已经排队但尚未处理的旧帧都必须丢弃。
+        // v20 只在 accepted 分支里挡住，poor/softTrack 仍可能把 raw anchor 推到尾部之外，
+        // 最后造成重复追加或错排。这里在分支之前统一处理。
+        if reachedVisualEnd, !finishRequested {
+            lastAcceptedSequence = max(lastAcceptedSequence, candidate.sequence)
+            acceptedScrollPosition = max(acceptedScrollPosition, candidate.scrollPosition)
+            lastQueuedScrollPosition = max(lastQueuedScrollPosition, candidate.scrollPosition)
+            trackingLost = false
+            consecutivePoorMatches = 0
+            fallbackCooldownFrames = 0
+            if !pendingFrameQueue.isEmpty {
+                LongCaptureDiagnostics.shared.log("match.dropQueueAfterEnd seq=\(candidate.sequence) dropped=\(pendingFrameQueue.count)")
+                pendingFrameQueue.removeAll()
+            }
+            LongCaptureDiagnostics.shared.log("match.ignoredAfterEnd seq=\(candidate.sequence) accepted=\(result.accepted) poor=\(result.poorMatch) top=\(result.topOffset) move=\(result.movementPixels) endScroll=\(String(format: "%.2f", Double(reachedVisualEndScrollPosition)))")
+            onStatus?("页面已到底，已忽略后续重复帧", false)
+            return
+        }
+
         if result.consumeScrollOnly {
             // 画面没变时只消费弱先验，不推进图像坐标。这样到底后不会把同一段内容
             // 反复拼到尾部，同时下一帧的滚轮先验也不会无限变大。
@@ -1585,15 +2065,15 @@ final class LongCaptureService {
             acceptedScrollPosition = max(acceptedScrollPosition, candidate.scrollPosition)
             lastQueuedScrollPosition = max(lastQueuedScrollPosition, candidate.scrollPosition)
             bottomNoVisualProgressCount += 1
-            if bottomNoVisualProgressCount >= 4 {
-                reachedVisualEnd = true
-                trackingLost = false
-                consecutivePoorMatches = 0
-                fallbackCooldownFrames = 0
-                if finishRequested, !pendingFrameQueue.isEmpty {
-                    LongCaptureDiagnostics.shared.log("finish.dropConsumeOnlyTail seq=\(candidate.sequence) dropped=\(pendingFrameQueue.count)")
-                    pendingFrameQueue.removeAll()
-                }
+            if bottomNoVisualProgressCount >= 3, let accumulator = canvasAccumulator {
+                LongCaptureDiagnostics.shared.log("scroll.consumeOnly seq=\(candidate.sequence) bottomNoProgress=\(bottomNoVisualProgressCount) reachedEnd=true totalScroll=\(String(format: "%.2f", Double(candidate.scrollPosition))) lastTop=\(previousAnchor?.topOffset ?? -1)")
+                lockReachedVisualEnd(
+                    reason: "stillFrameNoProgress",
+                    candidate: candidate,
+                    result: result,
+                    contentHeight: accumulator.contentHeight
+                )
+                return
             }
             LongCaptureDiagnostics.shared.log("scroll.consumeOnly seq=\(candidate.sequence) bottomNoProgress=\(bottomNoVisualProgressCount) reachedEnd=\(reachedVisualEnd) totalScroll=\(String(format: "%.2f", Double(candidate.scrollPosition))) lastTop=\(previousAnchor?.topOffset ?? -1)")
             if let status = result.status { onStatus?(status, false) }
@@ -1601,16 +2081,64 @@ final class LongCaptureService {
         }
 
         if result.accepted, let accumulator = canvasAccumulator {
+            // v16：如果队列里还有“确认到底之前”已经进来的帧，它们可能在 reachedVisualEnd
+            // 之后才跑出 accepted。此时绝不能再写 canvas，否则就会出现短图底部重复。
+            if reachedVisualEnd, !finishRequested {
+                lastAcceptedSequence = candidate.sequence
+                acceptedScrollPosition = max(acceptedScrollPosition, candidate.scrollPosition)
+                lastQueuedScrollPosition = max(lastQueuedScrollPosition, candidate.scrollPosition)
+                trackingLost = false
+                consecutivePoorMatches = 0
+                fallbackCooldownFrames = 0
+                LongCaptureDiagnostics.shared.log("match.acceptedIgnoredAfterEnd seq=\(candidate.sequence) top=\(result.topOffset) move=\(result.movementPixels) contentHeight=\(accumulator.contentHeight) totalScroll=\(String(format: "%.2f", Double(candidate.scrollPosition)))")
+                onStatus?("页面已到底，已忽略后续重复帧", false)
+                return
+            }
+
             let rawTopOffset = min(
                 maximumOutputHeight - candidate.image.height,
                 max(0, result.topOffset)
             )
+            let placementTopOffset = normalizedTopOffsetForCanvasPlacement(
+                rawTopOffset: rawTopOffset,
+                frameHeight: candidate.image.height,
+                contentHeight: accumulator.contentHeight,
+                sequence: candidate.sequence
+            )
+            let previousPoorCountBeforeAccept = consecutivePoorMatches
+            if shouldIgnoreAcceptedAfterBottomLikeRecovery(
+                result: result,
+                candidate: candidate,
+                accumulator: accumulator,
+                rawTopOffset: rawTopOffset,
+                previousPoorCount: previousPoorCountBeforeAccept
+            ) {
+                lockReachedVisualEnd(
+                    reason: "acceptedAfterBottomLikeRecovery",
+                    candidate: candidate,
+                    result: result,
+                    contentHeight: accumulator.contentHeight
+                )
+                LongCaptureDiagnostics.shared.log("match.acceptedIgnoredAsBottomDuplicate seq=\(candidate.sequence) top=\(rawTopOffset) poorBefore=\(previousPoorCountBeforeAccept) contentHeight=\(accumulator.contentHeight) scroll=\(String(format: "%.2f", Double(candidate.scrollPosition)))")
+                return
+            }
+            if appendConservativeShortRangeBottomTailIfNeeded(
+                result: result,
+                candidate: candidate,
+                accumulator: accumulator,
+                rawTopOffset: rawTopOffset,
+                placementTopOffset: placementTopOffset,
+                signature: signature
+            ) {
+                return
+            }
             let rawAnchor = LongCaptureFrameAnchor(
                 image: candidate.image,
                 signature: signature,
-                topOffset: rawTopOffset,
+                topOffset: placementTopOffset,
                 scrollPosition: candidate.scrollPosition
             )
+            let rawAnchorBeforeAccept = lastRawAnchor
 
             if let previousAnchor {
                 let scrollDelta = candidate.scrollPosition - previousAnchor.scrollPosition
@@ -1644,7 +2172,7 @@ final class LongCaptureService {
             let shouldForceFinalTail = finishRequested
             let placementResult = accumulator.place(
                 candidate.image,
-                topOffset: rawTopOffset,
+                topOffset: placementTopOffset,
                 minimumStep: minPlacementStep,
                 force: shouldForceFinalTail,
                 signature: signature
@@ -1654,10 +2182,10 @@ final class LongCaptureService {
             case let .placed(sourceStart, sourceHeight):
                 canvasAnchor = rawAnchor
                 lastUnplacedAcceptedTail = nil
-                LongCaptureDiagnostics.shared.log("canvas.place seq=\(candidate.sequence) top=\(rawTopOffset) move=\(result.movementPixels) sourceStart=\(sourceStart) sourceHeight=\(sourceHeight) contentHeight=\(accumulator.contentHeight) frameCount=\(accumulator.frameCount) placements=\(accumulator.placementCount) previewPlacements=\(previewStore?.placementCount ?? -1) minStep=\(minPlacementStep) pxPerPoint=\(String(format: "%.3f", Double(scrollPixelsPerPoint)))")
+                LongCaptureDiagnostics.shared.log("canvas.place seq=\(candidate.sequence) top=\(placementTopOffset) move=\(result.movementPixels) sourceStart=\(sourceStart) sourceHeight=\(sourceHeight) contentHeight=\(accumulator.contentHeight) frameCount=\(accumulator.frameCount) placements=\(accumulator.placementCount) previewPlacements=\(previewStore?.placementCount ?? -1) minStep=\(minPlacementStep) pxPerPoint=\(String(format: "%.3f", Double(scrollPixelsPerPoint)))")
                 previewStore?.place(
                     candidate.image,
-                    topOffset: rawTopOffset,
+                    topOffset: placementTopOffset,
                     sourceStart: sourceStart,
                     sourceHeight: sourceHeight
                 )
@@ -1667,7 +2195,7 @@ final class LongCaptureService {
                 onStatus?(result.status ?? "已采集 \(acceptedFrameCount) 帧", false)
             case .skippedTooClose:
                 skippedTooCloseCount += 1
-                let tailGrowth = rawTopOffset + candidate.image.height - accumulator.contentHeight
+                let tailGrowth = placementTopOffset + candidate.image.height - accumulator.contentHeight
                 if tailGrowth > 0 {
                     lastUnplacedAcceptedTail = PendingAcceptedTail(
                         anchor: rawAnchor,
@@ -1678,8 +2206,8 @@ final class LongCaptureService {
                         matchMargin: result.debug?.localMargin
                     )
                 }
-                acceptedOutputHeight = max(acceptedOutputHeight, rawTopOffset + candidate.image.height)
-                LongCaptureDiagnostics.shared.log("canvas.skipTooClose seq=\(candidate.sequence) top=\(rawTopOffset) lastPlaced=\(accumulator.lastPlacedTopOffset) contentHeight=\(accumulator.contentHeight) skipped=\(skippedTooCloseCount) minStep=\(minPlacementStep) tailGrowth=\(tailGrowth)")
+                acceptedOutputHeight = max(acceptedOutputHeight, placementTopOffset + candidate.image.height)
+                LongCaptureDiagnostics.shared.log("canvas.skipTooClose seq=\(candidate.sequence) top=\(placementTopOffset) lastPlaced=\(accumulator.lastPlacedTopOffset) contentHeight=\(accumulator.contentHeight) skipped=\(skippedTooCloseCount) minStep=\(minPlacementStep) tailGrowth=\(tailGrowth)")
                 onStatus?("正在跟踪滚动…已采集 \(acceptedFrameCount) 帧", false)
             case .skippedDuplicate:
                 skippedTooCloseCount += 1
@@ -1687,10 +2215,14 @@ final class LongCaptureService {
                 LongCaptureDiagnostics.shared.log("canvas.skipDuplicate seq=\(candidate.sequence) top=\(rawTopOffset) contentHeight=\(accumulator.contentHeight) minStep=\(minPlacementStep)")
                 onStatus?("已跳过重复尾部帧，继续滚动…", false)
             case .rejected:
+                // v18：画布拒绝写入时，不能把 lastRawAnchor 留在这个已被拒绝的 top 上。
+                // 否则 matcher 会继续从“画布前方很远的位置”往下追，后续即使用户停住也无法恢复，
+                // 表现为长截图截到中途断掉。恢复到进入本次 accepted 前的 raw anchor。
+                lastRawAnchor = rawAnchorBeforeAccept
                 rejectedPlacementCount += 1
                 trackingLost = true
                 consecutivePoorMatches += 1
-                LongCaptureDiagnostics.shared.log("canvas.rejected seq=\(candidate.sequence) top=\(rawTopOffset) lastPlaced=\(accumulator.lastPlacedTopOffset) contentHeight=\(accumulator.contentHeight) rejected=\(rejectedPlacementCount)")
+                LongCaptureDiagnostics.shared.log("canvas.rejected seq=\(candidate.sequence) rawTop=\(rawTopOffset) top=\(placementTopOffset) lastPlaced=\(accumulator.lastPlacedTopOffset) contentHeight=\(accumulator.contentHeight) rejected=\(rejectedPlacementCount)")
                 onStatus?("检测到非单调锚点，已跳过这一帧", false)
             }
             return
@@ -1699,6 +2231,27 @@ final class LongCaptureService {
         if result.poorMatch {
             poorMatchCount += 1
             consecutivePoorMatches += 1
+            if let accumulator = canvasAccumulator,
+               shouldLockVisualEndAfterRepeatedPoor(
+                result: result,
+                candidate: candidate,
+                accumulator: accumulator
+               ) {
+                lockReachedVisualEnd(
+                    reason: "repeatedPoorTail",
+                    candidate: candidate,
+                    result: result,
+                    contentHeight: accumulator.contentHeight
+                )
+                return
+            }
+            if promoteWeakOverlapBridgeIfNeeded(
+                result: result,
+                candidate: candidate,
+                signature: signature
+            ) {
+                return
+            }
             trackingLost = true
             let status = consecutivePoorMatches >= 6
                 ? "持续跟不上当前内容，请稍微往回滚动一点恢复锚点"
@@ -1887,23 +2440,30 @@ final class LongCaptureService {
         finishRequested = false
         isStopping = true
 
-        guard let accumulator = canvasAccumulator, accumulator.frameCount > 1 else {
-            isStopping = false
-            installScrollMonitor()
-            if let first = latestObservedFrame {
-                let geometry = captureGeometry(referencePixelSize: CGSize(width: first.width, height: first.height))
-                startCaptureStream(sourceRect: geometry.sourceRect, pixelSize: geometry.pixelSize)
-            }
-            LongCaptureDiagnostics.shared.log("finish.failure.notScrollable frameCount=\(canvasAccumulator?.frameCount ?? 0) contentHeight=\(canvasAccumulator?.contentHeight ?? 0)")
-            completion(.failure(LongCaptureError.notScrollable))
-            return
-        }
-
+        // v20：先提交最后一个 skippedTooClose 的有效尾巴，再判断是否“没有滚动”。
+        // 短页面只需要轻微滚动时，frameCount 可能暂时仍是 1；旧版先判 frameCount，
+        // 会误报“需要滚动页面”。
         commitPendingTailIfNeeded(reason: "finish")
 
         guard let refreshedAccumulator = canvasAccumulator else {
             completion(.failure(LongCaptureError.captureFailed))
             return
+        }
+
+        if refreshedAccumulator.frameCount <= 1 {
+            let userDidScroll = totalObservedScroll >= 6 || skippedTooCloseCount > 0
+            guard userDidScroll else {
+                isStopping = false
+                installScrollMonitor()
+                if let first = latestObservedFrame {
+                    let geometry = captureGeometry(referencePixelSize: CGSize(width: first.width, height: first.height))
+                    startCaptureStream(sourceRect: geometry.sourceRect, pixelSize: geometry.pixelSize)
+                }
+                LongCaptureDiagnostics.shared.log("finish.failure.notScrollable frameCount=\(canvasAccumulator?.frameCount ?? 0) contentHeight=\(canvasAccumulator?.contentHeight ?? 0) totalScroll=\(String(format: "%.2f", Double(totalObservedScroll))) skipped=\(skippedTooCloseCount) queued=\(queuedFrameCount)")
+                completion(.failure(LongCaptureError.notScrollable))
+                return
+            }
+            LongCaptureDiagnostics.shared.log("finish.singleFrameAccepted frameCount=\(refreshedAccumulator.frameCount) contentHeight=\(refreshedAccumulator.contentHeight) totalScroll=\(String(format: "%.2f", Double(totalObservedScroll))) skipped=\(skippedTooCloseCount) queued=\(queuedFrameCount)")
         }
         let canvasSnapshot = refreshedAccumulator.snapshot()
         LongCaptureDiagnostics.shared.log("finish.compose.start width=\(canvasSnapshot.width) height=\(canvasSnapshot.height) placements=\(canvasSnapshot.placements.count)")
