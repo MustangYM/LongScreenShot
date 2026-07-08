@@ -70,7 +70,7 @@ macOS 会要求截图类 App 授予屏幕录制权限：
 
 授权后如果仍然无法截图，完全退出 LongScreenShot 后重新打开一次。
 
-LongScreenShot 不需要“辅助功能/控制电脑”权限。长截图由用户自己滚动页面，App 不会自动操控鼠标或滚轮。
+LongScreenShot 不需要“辅助功能/控制电脑”权限。长截图由你自己滚动页面，App 不会自动操控鼠标或滚轮。
 
 ---
 
@@ -107,8 +107,6 @@ open LongScreenShot.xcodeproj
 ```bash
 ./scripts/package-dmg.sh
 ```
-
-正式分发给别人前，建议使用 Developer ID 签名并公证。
 
 ---
 
