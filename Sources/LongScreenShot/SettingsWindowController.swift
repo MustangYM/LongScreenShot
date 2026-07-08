@@ -10,11 +10,12 @@ final class SettingsWindowController: NSWindowController {
     private let languagePopup = NSPopUpButton()
     private let translationPopup = NSPopUpButton()
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let autoUpdateCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private var currentPage: Page = .general
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -80,6 +81,14 @@ final class SettingsWindowController: NSWindowController {
         launchAtLoginCheckbox.target = self
         launchAtLoginCheckbox.action = #selector(toggleLaunchAtLogin)
 
+        autoUpdateCheckbox.title = L10n.tr("settings.autoCheckUpdates")
+        autoUpdateCheckbox.state = UpdateChecker.autoCheckEnabled ? .on : .off
+        autoUpdateCheckbox.target = self
+        autoUpdateCheckbox.action = #selector(toggleAutoUpdateCheck)
+        let checkUpdateButton = NSButton(title: L10n.tr("settings.checkUpdates"), target: self, action: #selector(checkForUpdates))
+        let updateHint = NSTextField(wrappingLabelWithString: L10n.tr("settings.updateHint"))
+        updateHint.textColor = .secondaryLabelColor
+
         let hotKeyTitle = rowLabel("settings.hotkey")
         recorder.configuration = .current
         let restore = NSButton(title: L10n.tr("settings.restoreDefault"), target: self, action: #selector(restoreDefault))
@@ -98,6 +107,7 @@ final class SettingsWindowController: NSWindowController {
             title,
             languageTitle, languagePopup,
             launchAtLoginCheckbox,
+            autoUpdateCheckbox, checkUpdateButton, updateHint,
             hotKeyTitle, recorder, restore, hint,
             translationTitle, translationPopup, translationHint,
             permissionLabel, permissionButton
@@ -119,8 +129,16 @@ final class SettingsWindowController: NSWindowController {
             launchAtLoginCheckbox.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
             launchAtLoginCheckbox.topAnchor.constraint(equalTo: languagePopup.bottomAnchor, constant: 20),
 
+            autoUpdateCheckbox.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
+            autoUpdateCheckbox.topAnchor.constraint(equalTo: launchAtLoginCheckbox.bottomAnchor, constant: 18),
+            checkUpdateButton.leadingAnchor.constraint(equalTo: autoUpdateCheckbox.trailingAnchor, constant: 14),
+            checkUpdateButton.centerYAnchor.constraint(equalTo: autoUpdateCheckbox.centerYAnchor),
+            updateHint.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            updateHint.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
+            updateHint.topAnchor.constraint(equalTo: autoUpdateCheckbox.bottomAnchor, constant: 10),
+
             hotKeyTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            hotKeyTitle.topAnchor.constraint(equalTo: launchAtLoginCheckbox.bottomAnchor, constant: 32),
+            hotKeyTitle.topAnchor.constraint(equalTo: updateHint.bottomAnchor, constant: 30),
             recorder.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
             recorder.centerYAnchor.constraint(equalTo: hotKeyTitle.centerYAnchor),
             recorder.widthAnchor.constraint(equalToConstant: 220),
@@ -273,6 +291,14 @@ final class SettingsWindowController: NSWindowController {
         }
     }
 
+    @objc private func toggleAutoUpdateCheck() {
+        UpdateChecker.autoCheckEnabled = autoUpdateCheckbox.state == .on
+    }
+
+    @objc private func checkForUpdates() {
+        UpdateChecker.shared.checkForUpdates(userInitiated: true)
+    }
+
     @objc private func changeTranslationProvider() {
         guard let rawValue = translationPopup.selectedItem?.representedObject as? String,
               let provider = TranslationProvider(rawValue: rawValue) else { return }
@@ -282,6 +308,204 @@ final class SettingsWindowController: NSWindowController {
     @objc private func restoreDefault() {
         HotKeyConfiguration.current = .defaultValue
         recorder.configuration = .defaultValue
+    }
+}
+
+
+final class UpdateChecker {
+    static let shared = UpdateChecker()
+
+    private struct GitHubRelease: Decodable {
+        struct Asset: Decodable {
+            let name: String
+            let browserDownloadURL: String
+
+            private enum CodingKeys: String, CodingKey {
+                case name
+                case browserDownloadURL = "browser_download_url"
+            }
+        }
+
+        let tagName: String
+        let name: String?
+        let htmlURL: String
+        let draft: Bool
+        let prerelease: Bool
+        let assets: [Asset]
+
+        private enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case name
+            case htmlURL = "html_url"
+            case draft
+            case prerelease
+            case assets
+        }
+
+        var preferredUpdateURL: URL? {
+            let dmgAsset = assets.first { $0.name.lowercased().hasSuffix(".dmg") }
+            if let download = dmgAsset?.browserDownloadURL, let url = URL(string: download) {
+                return url
+            }
+            return URL(string: htmlURL)
+        }
+    }
+
+    private struct Version: Comparable, CustomStringConvertible {
+        let rawValue: String
+        private let numbers: [Int]
+
+        init(_ value: String) {
+            var cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.lowercased().hasPrefix("v") {
+                cleaned.removeFirst()
+            }
+            rawValue = cleaned
+            numbers = cleaned
+                .split(separator: ".")
+                .map { part in
+                    let numericPrefix = part.prefix { $0.isNumber }
+                    return Int(numericPrefix) ?? 0
+                }
+        }
+
+        var description: String { rawValue }
+
+        static func < (lhs: Version, rhs: Version) -> Bool {
+            let count = max(lhs.numbers.count, rhs.numbers.count)
+            for index in 0..<count {
+                let left = index < lhs.numbers.count ? lhs.numbers[index] : 0
+                let right = index < rhs.numbers.count ? rhs.numbers[index] : 0
+                if left != right { return left < right }
+            }
+            return false
+        }
+    }
+
+    private enum Keys {
+        static let autoCheck = "autoCheckForUpdates"
+        static let lastCheckAt = "lastUpdateCheckAt"
+    }
+
+    static var autoCheckEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: Keys.autoCheck) == nil { return true }
+            return UserDefaults.standard.bool(forKey: Keys.autoCheck)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Keys.autoCheck)
+        }
+    }
+
+    private let apiURL = URL(string: "https://api.github.com/repos/MustangYM/LongScreenShot/releases/latest")!
+    private let fallbackURL = URL(string: "https://github.com/MustangYM/LongScreenShot/releases")!
+    private var isChecking = false
+
+    private init() {}
+
+    func checkAutomaticallyIfNeeded() {
+        guard Self.autoCheckEnabled else { return }
+        let lastCheck = UserDefaults.standard.double(forKey: Keys.lastCheckAt)
+        guard Date().timeIntervalSince1970 - lastCheck > 12 * 60 * 60 else { return }
+        checkForUpdates(userInitiated: false)
+    }
+
+    func checkForUpdates(userInitiated: Bool) {
+        guard !isChecking else {
+            if userInitiated {
+                showMessage(title: L10n.tr("update.checking"), message: "")
+            }
+            return
+        }
+
+        isChecking = true
+        var request = URLRequest(url: apiURL)
+        request.timeoutInterval = 12
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("LongScreenShot/\(currentVersion().description)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                self?.handleResponse(data: data, response: response, error: error, userInitiated: userInitiated)
+            }
+        }.resume()
+    }
+
+    private func handleResponse(data: Data?, response: URLResponse?, error: Error?, userInitiated: Bool) {
+        isChecking = false
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Keys.lastCheckAt)
+
+        if let error {
+            if userInitiated {
+                showMessage(title: L10n.tr("update.failedTitle"), message: error.localizedDescription)
+            }
+            return
+        }
+
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              let data else {
+            if userInitiated {
+                showMessage(title: L10n.tr("update.failedTitle"), message: L10n.tr("update.failedMessage"))
+            }
+            return
+        }
+
+        do {
+            let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+            guard !release.draft, !release.prerelease else {
+                if userInitiated { showUpToDate() }
+                return
+            }
+
+            let latest = Version(release.tagName)
+            let current = currentVersion()
+            if latest > current {
+                showUpdateAvailable(release: release, latest: latest, current: current)
+            } else if userInitiated {
+                showUpToDate()
+            }
+        } catch {
+            if userInitiated {
+                showMessage(title: L10n.tr("update.failedTitle"), message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func currentVersion() -> Version {
+        let raw = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        return Version(raw)
+    }
+
+    private func showUpdateAvailable(release: GitHubRelease, latest: Version, current: Version) {
+        let alert = NSAlert()
+        alert.messageText = L10n.tr("update.availableTitle")
+        let fallbackName = "v\(latest.description)"
+        let releaseName = (release.name?.isEmpty == false) ? (release.name ?? fallbackName) : fallbackName
+        alert.informativeText = "\(releaseName)\n\n" + L10n.format("update.availableMessage", latest.description, current.description)
+        alert.addButton(withTitle: L10n.tr("update.openRelease"))
+        alert.addButton(withTitle: L10n.tr("common.later"))
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(release.preferredUpdateURL ?? fallbackURL)
+        }
+    }
+
+    private func showUpToDate() {
+        showMessage(
+            title: L10n.tr("update.noUpdateTitle"),
+            message: L10n.format("update.noUpdateMessage", currentVersion().description)
+        )
+    }
+
+    private func showMessage(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 }
 

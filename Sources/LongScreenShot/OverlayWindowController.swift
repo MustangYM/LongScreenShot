@@ -89,10 +89,14 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
         toolbarController.showWindow(nil)
         toolbarController.window?.orderFrontRegardless()
 
+        var excludedWindowIDs = [CGWindowID(window.windowNumber)]
+        if let toolbarWindowNumber = toolbarController.window?.windowNumber {
+            excludedWindowIDs.append(CGWindowID(toolbarWindowNumber))
+        }
         let service = LongCaptureService(
             snapshot: snapshot,
             selection: selection,
-            overlayWindowID: CGWindowID(window.windowNumber)
+            excludedWindowIDs: excludedWindowIDs
         )
         longCaptureService = service
         service.onPreview = { [weak view] image, count in
@@ -1651,7 +1655,9 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         )
         guard content.width > 0, content.height > 0 else { return }
         func fittedRect(for image: NSImage) -> CGRect {
-            let scale = min(content.width / image.size.width, content.height / image.size.height)
+            // 当长图高度超过 minimap 时，按高度等比缩小；高度贴满 minimap，宽度随比例变窄。
+            // 这是 ScreenSnap 这类 minimap 的稳定显示方式：只做等比缩放，不做纵向压缩/重采样变形。
+            let scale = min(content.width / max(1, image.size.width), content.height / max(1, image.size.height))
             let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
             return CGRect(
                 x: content.midX - size.width / 2,

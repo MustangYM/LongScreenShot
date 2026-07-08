@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShotTests.build/primary.swiftdeps"
+  },
+  "/Users/mustangym/LongScreenShot/Tests/LongScreenShotTests/FrameStitcherTests.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShotTests.build/FrameStitcherTests.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShotTests.build/FrameStitcherTests.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShotTests.build/FrameStitcherTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShotTests.build/FrameStitcherTests.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShotTests.build/FrameStitcherTests.dia"
+  }
+}

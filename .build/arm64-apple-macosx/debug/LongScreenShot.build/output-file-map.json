@@ -1,0 +1,82 @@
+{
+  "": {
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/primary.swiftdeps"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/Annotations.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/Annotations.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/Annotations.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/Annotations~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/Annotations.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/Annotations.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/AppDelegate.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/AppDelegate.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/AppDelegate.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/AppDelegate.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/CaptureCoordinator.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureCoordinator.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureCoordinator.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureCoordinator~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureCoordinator.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureCoordinator.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/CaptureToolbarView.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureToolbarView.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureToolbarView.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureToolbarView~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureToolbarView.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/CaptureToolbarView.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/GlobalHotKey.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/GlobalHotKey.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/GlobalHotKey.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/GlobalHotKey~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/GlobalHotKey.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/GlobalHotKey.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/ImageServices.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/ImageServices.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/ImageServices.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/ImageServices~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/ImageServices.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/ImageServices.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/LongCaptureService.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/LongCaptureService.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/LongCaptureService.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/LongCaptureService~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/LongCaptureService.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/LongCaptureService.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/OverlayWindowController.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/OverlayWindowController.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/OverlayWindowController.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/OverlayWindowController~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/OverlayWindowController.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/OverlayWindowController.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/PinWindowController.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/PinWindowController.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/PinWindowController.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/PinWindowController~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/PinWindowController.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/PinWindowController.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/SettingsWindowController.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/SettingsWindowController.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/SettingsWindowController.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/SettingsWindowController~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/SettingsWindowController.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/SettingsWindowController.dia"
+  },
+  "/Users/mustangym/LongScreenShot/Sources/LongScreenShot/main.swift": {
+    "dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/main.d",
+    "object": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/main.swift.o",
+    "swiftmodule": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/main.swiftdeps",
+    "diagnostics": "/Users/mustangym/LongScreenShot/.build/arm64-apple-macosx/debug/LongScreenShot.build/main.dia"
+  }
+}
