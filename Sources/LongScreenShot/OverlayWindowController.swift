@@ -60,9 +60,12 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     override func close() {
         longCaptureService?.cancel()
         longCaptureService = nil
+        (window?.contentView as? CaptureOverlayView)?.prepareForClose()
         longCaptureToolbarController?.close()
         longCaptureToolbarController = nil
         escapeHotKey = nil
+        onCancel = nil
+        onComplete = nil
         NSCursor.pop()
         super.close()
     }
@@ -250,6 +253,32 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var acceptsFirstResponder: Bool { true }
+
+    func prepareForClose() {
+        cancelInlineTextEditing()
+        stylePanel?.removeFromSuperview()
+        stylePanel = nil
+        tooltipLabel?.removeFromSuperview()
+        tooltipLabel = nil
+        toolbar?.removeFromSuperview()
+        toolbar = nil
+        clearMosaicPreviewCache()
+        ImageEffects.clearCaches()
+        manualPreviewImage = nil
+        annotations.removeAll(keepingCapacity: false)
+        undoSnapshots.removeAll(keepingCapacity: false)
+        redoSnapshots.removeAll(keepingCapacity: false)
+        activePoints.removeAll(keepingCapacity: false)
+        selectedAnnotationIndex = nil
+        selectedMosaicIndex = nil
+        annotationBeforeAdjustment = nil
+        annotationBoundsBeforeAdjustment = nil
+        annotationsBeforeAdjustment.removeAll(keepingCapacity: false)
+        if let active = Self.activeOwner, active === self {
+            Self.activeOwner = nil
+        }
+        layer?.contents = nil
+    }
 
     private func becomeActiveOwner() {
         Self.activeOwner = self

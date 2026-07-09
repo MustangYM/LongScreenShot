@@ -123,6 +123,12 @@ final class ScrollCaptureStream: NSObject, SCStreamOutput {
         self.excludedWindowIDs = excludedWindowIDs
     }
 
+    deinit {
+        onFrame = nil
+        onError = nil
+        stop()
+    }
+
     convenience init(
         displayID: CGDirectDisplayID,
         sourceRect: CGRect,
@@ -1588,6 +1594,10 @@ final class LongCaptureService {
         self.init(snapshot: snapshot, selection: selection, excludedWindowIDs: [overlayWindowID])
     }
 
+    deinit {
+        releaseCaptureResources(clearCallbacks: true)
+    }
+
     func start() {
         guard let rawFirst = snapshot.crop(viewRect: selection) else { return }
         let geometry = captureGeometry(referencePixelSize: CGSize(width: rawFirst.width, height: rawFirst.height))
@@ -1741,22 +1751,42 @@ final class LongCaptureService {
         LongCaptureDiagnostics.shared.log("service.cancel pending=\(pendingFrameQueue.count) inFlight=\(matchInFlight) acceptedFrames=\(acceptedFrameCount) acceptedHeight=\(acceptedOutputHeight)")
         isStopping = true
         finishRequested = false
-        finishCompletion = nil
+        releaseCaptureResources(clearCallbacks: true)
+    }
+
+    private func releaseCaptureResources(clearCallbacks: Bool) {
+        previewFlushWorkItem?.cancel()
+        previewFlushWorkItem = nil
+
+        captureStream?.onFrame = nil
+        captureStream?.onError = nil
         captureStream?.stop()
         captureStream = nil
         removeScrollMonitor()
-        pendingFrameQueue = []
-        previewFlushWorkItem?.cancel()
-        previewFlushWorkItem = nil
+
+        finishCompletion = nil
+        pendingFrameQueue.removeAll(keepingCapacity: false)
         previewStore = nil
+        previewCanvas = nil
+        canvasAccumulator = nil
+        lastRawAnchor = nil
+        canvasAnchor = nil
+        latestObservedFrame = nil
+        lastUnplacedAcceptedTail = nil
+
+        matchInFlight = false
         previewRenderInFlight = false
         previewRenderPending = false
         lastPreviewRenderedContentHeight = 0
         lastPreviewRenderedPlacementCount = 0
         lastPreviewRenderedTime = 0
-        lastUnplacedAcceptedTail = nil
         scrollPixelsPerPoint = 0
         fallbackCooldownFrames = 0
+
+        if clearCallbacks {
+            onPreview = nil
+            onStatus = nil
+        }
     }
 
     private func receiveStreamFrame(_ rawCurrent: CGImage, sequence: Int) {
@@ -2446,6 +2476,7 @@ final class LongCaptureService {
         commitPendingTailIfNeeded(reason: "finish")
 
         guard let refreshedAccumulator = canvasAccumulator else {
+            releaseCaptureResources(clearCallbacks: true)
             completion(.failure(LongCaptureError.captureFailed))
             return
         }
@@ -2467,6 +2498,7 @@ final class LongCaptureService {
         }
         let canvasSnapshot = refreshedAccumulator.snapshot()
         LongCaptureDiagnostics.shared.log("finish.compose.start width=\(canvasSnapshot.width) height=\(canvasSnapshot.height) placements=\(canvasSnapshot.placements.count)")
+        releaseCaptureResources(clearCallbacks: true)
         DispatchQueue.global(qos: .userInitiated).async {
             let started = ProcessInfo.processInfo.systemUptime
             let result = canvasSnapshot.makeImage()

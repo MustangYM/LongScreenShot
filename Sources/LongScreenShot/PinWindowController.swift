@@ -11,8 +11,9 @@ final class PinWindowController: NSWindowController {
     }
 
     static func closeAll() {
-        pins.forEach { $0.close() }
+        let currentPins = pins
         pins.removeAll()
+        currentPins.forEach { $0.close() }
         OCRResultWindowController.closeAll()
         TranslationResultWindowController.closeAll()
     }
@@ -36,12 +37,21 @@ final class PinWindowController: NSWindowController {
         window.backgroundColor = .windowBackgroundColor
         window.minSize = NSSize(width: 120, height: 90)
         let view = PinImageView(image: NSImage(cgImage: image, size: size))
-        view.onClose = { [weak window] in window?.close() }
         window.contentView = view
         super.init(window: window)
+        view.onClose = { [weak self] in self?.close() }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func close() {
+        Self.pins.removeAll { $0 === self }
+        if let imageView = window?.contentView as? PinImageView {
+            imageView.prepareForClose()
+        }
+        window?.contentView = nil
+        super.close()
+    }
 }
 
 final class PinImageView: NSImageView {
@@ -72,6 +82,15 @@ final class PinImageView: NSImageView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func prepareForClose() {
+        onClose = nil
+        onFrameChange = nil
+        image = nil
+        closeButton.target = nil
+        closeButton.action = nil
+    }
+
     override func mouseEntered(with event: NSEvent) { closeButton.isHidden = false }
     override func mouseDown(with event: NSEvent) {
         dragStartMouse = NSEvent.mouseLocation
@@ -184,8 +203,9 @@ final class OCRResultWindowController: NSWindowController {
     }
 
     static func closeAll() {
-        results.forEach { $0.close() }
+        let currentResults = results
         results.removeAll()
+        currentResults.forEach { $0.close() }
     }
 
     init(image: CGImage, text: String) {
@@ -229,9 +249,16 @@ final class OCRResultWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func close() {
+        Self.results.removeAll { $0 === self }
+        if let imageView = window?.contentView as? PinImageView {
+            imageView.prepareForClose()
+        }
+        window?.contentView = nil
         if let textWindow {
             window?.removeChildWindow(textWindow)
+            textWindow.contentView = nil
             textWindow.close()
+            self.textWindow = nil
         }
         super.close()
     }
@@ -312,8 +339,9 @@ final class TranslationResultWindowController: NSWindowController {
     }
 
     static func closeAll() {
-        results.forEach { $0.close() }
+        let currentResults = results
         results.removeAll()
+        currentResults.forEach { $0.close() }
     }
 
     init(sourceText: String, translatedText: String, provider: TranslationProvider) {
@@ -408,6 +436,7 @@ final class TranslationResultWindowController: NSWindowController {
 
     override func close() {
         Self.results.removeAll { $0 === self }
+        window?.contentView = nil
         super.close()
     }
 

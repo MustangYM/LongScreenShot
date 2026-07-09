@@ -16,6 +16,11 @@ enum ImageEffects {
         .useSoftwareRenderer: true
     ])
 
+    static func clearCaches() {
+        ciContext.clearCaches()
+        softwareCIContext.clearCaches()
+    }
+
     static func mosaicPatch(
         from image: CGImage,
         pixelRectTopLeft rect: CGRect,
@@ -220,9 +225,11 @@ enum ImageExporter {
     }
 
     static func writePNG(_ image: CGImage, to url: URL) {
-        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
-        CGImageDestinationAddImage(destination, image, nil)
-        CGImageDestinationFinalize(destination)
+        autoreleasepool {
+            guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(destination, image, nil)
+            CGImageDestinationFinalize(destination)
+        }
     }
 
     private static func defaultFilename() -> String {
@@ -310,47 +317,58 @@ final class CaptureHistoryManager {
         let date = Date()
         let filename = "\(filenameFormatter.string(from: date))_\(width)x\(height)_\(UUID().uuidString.prefix(8)).png"
         queue.async { [filenameFormatter] in
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let url = directory.appendingPathComponent(filename)
-                ImageExporter.writePNG(image, to: url)
-                self.trim(in: directory, maximumCount: maxCount)
-            } catch {
-                NSLog("LongScreenShot history save failed: \(error.localizedDescription)")
+            autoreleasepool {
+                do {
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let url = directory.appendingPathComponent(filename)
+                    ImageExporter.writePNG(image, to: url)
+                    self.trim(in: directory, maximumCount: maxCount)
+                } catch {
+                    NSLog("LongScreenShot history save failed: \(error.localizedDescription)")
+                }
             }
             _ = filenameFormatter
         }
     }
 
+    /// 同步版本保留给旧调用方。注意：窗口展示不要直接调用它，避免主线程卡顿。
     func items() -> [CaptureHistoryItem] {
+        Array(loadItems(in: CaptureHistoryPreferences.directoryURL).prefix(CaptureHistoryPreferences.maximumCount))
+    }
+
+    /// 历史窗口专用：放到后台队列扫描目录和读取轻量元数据，完成后回主线程。
+    func asyncItems(completion: @escaping ([CaptureHistoryItem]) -> Void) {
         let directory = CaptureHistoryPreferences.directoryURL
+        let displayLimit = CaptureHistoryPreferences.maximumCount
+        queue.async {
+            let result = autoreleasepool { Array(self.loadItems(in: directory).prefix(displayLimit)) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func delete(_ item: CaptureHistoryItem) {
+        CaptureHistoryThumbnailCache.shared.remove(url: item.url)
+        try? FileManager.default.removeItem(at: item.url)
+    }
+
+    private func loadItems(in directory: URL) -> [CaptureHistoryItem] {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey, .isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) else { return [] }
+
         return urls
             .filter { $0.pathExtension.lowercased() == "png" }
             .compactMap(item(for:))
             .sorted { $0.date > $1.date }
     }
 
-    func delete(_ item: CaptureHistoryItem) {
-        try? FileManager.default.removeItem(at: item.url)
-    }
-
     private func trim(in directory: URL, maximumCount: Int) {
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-        let all = urls
-            .filter { $0.pathExtension.lowercased() == "png" }
-            .compactMap(item(for:))
-            .sorted { $0.date > $1.date }
+        let all = loadItems(in: directory)
         guard all.count > maximumCount else { return }
         for item in all.dropFirst(maximumCount) {
+            CaptureHistoryThumbnailCache.shared.remove(url: item.url)
             try? FileManager.default.removeItem(at: item.url)
         }
     }
@@ -359,12 +377,16 @@ final class CaptureHistoryManager {
         guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
         let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
         let date = values?.creationDate ?? values?.contentModificationDate ?? Date.distantPast
-        let size = imagePixelSize(url: url) ?? parseSize(from: url.lastPathComponent) ?? .zero
+
+        // 新版历史文件名里本来就带了 _宽x高_，优先解析文件名，避免为每张图创建 CGImageSource。
+        // 只有旧文件名缺失尺寸时，才退回读取图片属性。
+        let size = parseSize(from: url.lastPathComponent) ?? imagePixelSize(url: url) ?? .zero
         return CaptureHistoryItem(url: url, date: date, width: Int(size.width), height: Int(size.height))
     }
 
     private func imagePixelSize(url: URL) -> CGSize? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
         let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
         let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
@@ -380,7 +402,6 @@ final class CaptureHistoryManager {
         return CGSize(width: width, height: height)
     }
 }
-
 
 final class FeedbackToast {
     private static var activePanels: [NSPanel] = []
@@ -561,6 +582,82 @@ private final class CaptureHistoryRootView: NSVisualEffectView {
     }
 }
 
+private final class CaptureHistoryThumbnailCache {
+    static let shared = CaptureHistoryThumbnailCache()
+
+    private let cache = NSCache<NSString, CGImage>()
+    private let workerQueue = DispatchQueue(label: "longscreenshot.capture.history.thumbnail.worker", qos: .userInitiated, attributes: .concurrent)
+    private let stateQueue = DispatchQueue(label: "longscreenshot.capture.history.thumbnail.state")
+    private var inFlight: [String: [(CGImage?) -> Void]] = [:]
+
+    private init() {
+        cache.countLimit = 320
+        cache.totalCostLimit = 96 * 1024 * 1024
+    }
+
+    func thumbnail(for url: URL, maxPixelSize: Int, completion: @escaping (CGImage?) -> Void) {
+        let key = cacheKey(url: url, maxPixelSize: maxPixelSize)
+        if let cached = cache.object(forKey: key as NSString) {
+            DispatchQueue.main.async { completion(cached) }
+            return
+        }
+
+        stateQueue.async {
+            if self.inFlight[key] != nil {
+                self.inFlight[key]?.append(completion)
+                return
+            }
+
+            self.inFlight[key] = [completion]
+            self.workerQueue.async {
+                let thumbnail = autoreleasepool {
+                    Self.makeThumbnail(url: url, maxPixelSize: maxPixelSize)
+                }
+
+                if let thumbnail {
+                    let cost = thumbnail.bytesPerRow * thumbnail.height
+                    self.cache.setObject(thumbnail, forKey: key as NSString, cost: cost)
+                }
+
+                self.stateQueue.async {
+                    let completions = self.inFlight.removeValue(forKey: key) ?? []
+                    DispatchQueue.main.async {
+                        completions.forEach { $0(thumbnail) }
+                    }
+                }
+            }
+        }
+    }
+
+    func remove(url: URL) {
+        let key = cacheKey(url: url, maxPixelSize: 420)
+        cache.removeObject(forKey: key as NSString)
+    }
+
+    private func cacheKey(url: URL, maxPixelSize: Int) -> String {
+        "\(url.path)|\(maxPixelSize)"
+    }
+
+    private static func makeThumbnail(url: URL, maxPixelSize: Int) -> CGImage? {
+        let sourceOptions = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
+        ] as CFDictionary
+
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
+        ] as CFDictionary
+
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions)
+    }
+}
+
 final class CaptureHistoryWindowController: NSWindowController {
     static let shared = CaptureHistoryWindowController()
 
@@ -571,6 +668,8 @@ final class CaptureHistoryWindowController: NSWindowController {
     private let emptyLabel = NSTextField(labelWithString: "")
     private var selectedItem: CaptureHistoryItem?
     private var cardViews: [CaptureHistoryCardView] = []
+    private var reloadGeneration: Int = 0
+    private var boundsObserver: NSObjectProtocol?
 
     private init() {
         let screen = Self.screenUnderPointer() ?? NSScreen.main
@@ -598,9 +697,20 @@ final class CaptureHistoryWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+        }
+    }
+
     func showAtPointer() {
         positionAtPointerScreen()
-        reload()
+        prepareForDisplay()
+        presentWindow()
+        reloadAsync()
+    }
+
+    private func presentWindow() {
         guard let window else { return }
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.level = .floating
@@ -609,12 +719,14 @@ final class CaptureHistoryWindowController: NSWindowController {
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(rootView)
+
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             NSApp.activate(ignoringOtherApps: true)
             window.orderFrontRegardless()
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(self.rootView)
+            self.loadVisibleThumbnails()
         }
     }
 
@@ -644,7 +756,16 @@ final class CaptureHistoryWindowController: NSWindowController {
         scrollView.autohidesScrollers = true
         scrollView.documentView = historyContentView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.contentView.postsBoundsChangedNotifications = true
         rootView.addSubview(scrollView)
+
+        boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.loadVisibleThumbnails()
+        }
 
         emptyLabel.font = .systemFont(ofSize: 15, weight: .medium)
         emptyLabel.textColor = .secondaryLabelColor
@@ -668,18 +789,41 @@ final class CaptureHistoryWindowController: NSWindowController {
         ])
     }
 
-    private func reload() {
+    private func prepareForDisplay() {
+        titleLabel.stringValue = L10n.tr("history.title")
+        window?.title = L10n.tr("history.title")
+
+        // 如果已有旧列表，先直接显示旧列表，后台刷新；首次打开才显示 Loading。
+        if cardViews.isEmpty {
+            emptyLabel.stringValue = "Loading..."
+            emptyLabel.isHidden = false
+            scrollView.isHidden = true
+        }
+    }
+
+    private func reloadAsync() {
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        CaptureHistoryManager.shared.asyncItems { [weak self] items in
+            guard let self, generation == self.reloadGeneration else { return }
+            self.render(items: items)
+        }
+    }
+
+    private func render(items: [CaptureHistoryItem]) {
         titleLabel.stringValue = L10n.tr("history.title")
         window?.title = L10n.tr("history.title")
         emptyLabel.stringValue = L10n.tr("history.empty")
+
         historyContentView.subviews.forEach { $0.removeFromSuperview() }
         cardViews.removeAll()
-        let items = CaptureHistoryManager.shared.items()
+
         if let selectedItem, !items.contains(selectedItem) {
             self.selectedItem = items.first
         } else if selectedItem == nil {
             selectedItem = items.first
         }
+
         emptyLabel.isHidden = !items.isEmpty
         scrollView.isHidden = items.isEmpty
 
@@ -699,7 +843,7 @@ final class CaptureHistoryWindowController: NSWindowController {
                     CaptureHistoryManager.shared.delete(deleted)
                     if self.selectedItem == deleted { self.selectedItem = nil }
                     FeedbackToast.show(L10n.tr("history.deleted"), screen: self.window?.screen, anchorRect: self.window?.frame)
-                    self.reload()
+                    self.reloadAsync()
                 }
             )
             card.frame = NSRect(
@@ -712,6 +856,18 @@ final class CaptureHistoryWindowController: NSWindowController {
             historyContentView.addSubview(card)
             cardViews.append(card)
         }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.loadVisibleThumbnails()
+        }
+    }
+
+    private func loadVisibleThumbnails() {
+        guard !cardViews.isEmpty, !scrollView.isHidden else { return }
+        let preloadRect = scrollView.contentView.bounds.insetBy(dx: -460, dy: -40)
+        for card in cardViews where card.frame.intersects(preloadRect) {
+            card.startThumbnailLoad()
+        }
     }
 
     private func selectItem(_ item: CaptureHistoryItem) {
@@ -721,13 +877,30 @@ final class CaptureHistoryWindowController: NSWindowController {
     }
 
     private func copySelectedItem() {
-        guard let item = selectedItem,
-              let image = CGImageSourceCreateWithURL(item.url as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) else {
+        guard let item = selectedItem else {
             NSSound.beep()
             return
         }
-        ImageExporter.copyToPasteboard(image)
-        FeedbackToast.show(L10n.tr("feedback.copied"), screen: window?.screen, anchorRect: window?.frame)
+        copyItemToPasteboard(item)
+    }
+
+    private func copyItemToPasteboard(_ item: CaptureHistoryItem) {
+        let targetScreen = window?.screen
+        let anchorRect = window?.frame
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = autoreleasepool {
+                CGImageSourceCreateWithURL(item.url as CFURL, nil)
+                    .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+            }
+            DispatchQueue.main.async {
+                guard let image else {
+                    NSSound.beep()
+                    return
+                }
+                ImageExporter.copyToPasteboard(image)
+                FeedbackToast.show(L10n.tr("feedback.copied"), screen: targetScreen, anchorRect: anchorRect)
+            }
+        }
     }
 
     private func positionAtPointerScreen() {
@@ -751,6 +924,8 @@ private final class CaptureHistoryCardView: NSView {
     let item: CaptureHistoryItem
     private let onSelect: (CaptureHistoryItem) -> Void
     private let onDelete: (CaptureHistoryItem) -> Void
+    private let imageView = NSImageView()
+    private var thumbnailRequested = false
     private var isDeleting = false
 
     var isSelected: Bool = false {
@@ -772,13 +947,27 @@ private final class CaptureHistoryCardView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    func startThumbnailLoad() {
+        guard !thumbnailRequested, !isDeleting else { return }
+        thumbnailRequested = true
+        let itemURL = item.url
+        CaptureHistoryThumbnailCache.shared.thumbnail(for: itemURL, maxPixelSize: 420) { [weak self] thumbnail in
+            guard let self, !self.isDeleting, self.item.url == itemURL, let thumbnail else { return }
+            self.imageView.alphaValue = 0
+            self.imageView.image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.imageView.animator().alphaValue = 1
+            }
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard !isDeleting else { return }
         onSelect(item)
-        if event.clickCount >= 2,
-           let image = CGImageSourceCreateWithURL(item.url as CFURL, nil).flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) {
-            ImageExporter.copyToPasteboard(image)
-            FeedbackToast.show(L10n.tr("feedback.copied"), screen: window?.screen, anchorRect: window?.frame)
+        if event.clickCount >= 2 {
+            copyItemToPasteboard()
         } else {
             super.mouseDown(with: event)
         }
@@ -806,8 +995,6 @@ private final class CaptureHistoryCardView: NSView {
         shadow?.shadowOffset = .zero
         shadow?.shadowColor = .clear
 
-        let imageView = NSImageView()
-        imageView.image = thumbnailImage(url: item.url, maxPixelSize: 420)
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = 12
@@ -864,6 +1051,26 @@ private final class CaptureHistoryCardView: NSView {
     @objc private func showInFinder() {
         guard !isDeleting else { return }
         NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    private func copyItemToPasteboard() {
+        let targetScreen = window?.screen
+        let anchorRect = window?.frame
+        let itemURL = item.url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = autoreleasepool {
+                CGImageSourceCreateWithURL(itemURL as CFURL, nil)
+                    .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+            }
+            DispatchQueue.main.async {
+                guard let image else {
+                    NSSound.beep()
+                    return
+                }
+                ImageExporter.copyToPasteboard(image)
+                FeedbackToast.show(L10n.tr("feedback.copied"), screen: targetScreen, anchorRect: anchorRect)
+            }
+        }
     }
 
     /// 高级删除动画：
@@ -1164,16 +1371,6 @@ private final class CaptureHistoryCardView: NSView {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             changes()
         }
-    }
-
-    private func thumbnailImage(url: URL, maxPixelSize: Int) -> NSImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-              ] as CFDictionary) else { return NSImage(contentsOf: url) }
-        return NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
     }
 
     private func relativeTime(for date: Date) -> String {
