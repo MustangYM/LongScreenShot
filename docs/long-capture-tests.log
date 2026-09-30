@@ -1,0 +1,71 @@
+[0/1] Planning build
+Building for production...
+[0/5] Write sources
+[2/5] Write swift-version--58304C5D6DBC2206.txt
+[4/6] Compiling LongScreenShot Annotations.swift
+[4/8] Write Objects.LinkFileList
+[5/8] Linking LongScreenShot
+[7/9] Compiling LongScreenShotTests FrameStitcherTests.swift
+[8/10] Compiling LongScreenShotPackageTests runner.swift
+[8/10] Write Objects.LinkFileList
+[9/10] Linking LongScreenShotPackageTests
+Build complete! (41.75s)
+Test Suite 'All tests' started at 2026-09-30 19:51:45.695.
+Test Suite 'LongScreenShotPackageTests.xctest' started at 2026-09-30 19:51:45.695.
+Test Suite 'FrameStitcherTests' started at 2026-09-30 19:51:45.695.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRecoversWhenScrollDeltaOverestimatesPageMovement]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRecoversWhenScrollDeltaOverestimatesPageMovement]' passed (0.002 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRetainsSinglePixelVerticalPrecision]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRetainsSinglePixelVerticalPrecision]' passed (0.003 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBothMosaicStylesChangePixels]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBothMosaicStylesChangePixels]' passed (0.043 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBottomBounceProducesAlmostNoNewContent]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBottomBounceProducesAlmostNoNewContent]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testChunkedOverviewShowsTheWholeDocumentWithoutCumulativeBlur]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testChunkedOverviewShowsTheWholeDocumentWithoutCumulativeBlur]' passed (0.006 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testDuplicateDetection]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testDuplicateDetection]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFastScrollSequenceKeepsContinuousOverlap]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFastScrollSequenceKeepsContinuousOverlap]' passed (0.005 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testHighVisualScoreCanRecoverWhenItAgreesWithMeasuredScroll]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testHighVisualScoreCanRecoverWhenItAgreesWithMeasuredScroll]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalPreviewCanvasStaysBoundedAndKeepsGrowing]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalPreviewCanvasStaysBoundedAndKeepsGrowing]' passed (0.004 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalSegmentsComposeWithoutKeepingFullFrames]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalSegmentsComposeWithoutKeepingFullFrames]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testNCCAlignmentSurvivesUniformBrightnessChange]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testNCCAlignmentSurvivesUniformBrightnessChange]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testOverlapAndStitchedDimensions]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testOverlapAndStitchedDimensions]' passed (0.002 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewCanvasHasBoundedBackingSize]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewCanvasHasBoundedBackingSize]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewIsDownsampledInsteadOfFullResolution]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewIsDownsampledInsteadOfFullResolution]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewTilesReplaceTailWithoutGapsOrVerticalFlip]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewTilesReplaceTailWithoutGapsOrVerticalFlip]' passed (0.004 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testRetinaCapturePipelineKeepsUpWith60FPSInDebug]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testRetinaCapturePipelineKeepsUpWith60FPSInDebug]' passed (0.699 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testSeamBacktrackAndTailReplacementPreserveExactContent]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testSeamBacktrackAndTailReplacementPreserveExactContent]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVeryWideFastScrollKeepsSourceRowPrecision]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVeryWideFastScrollKeepsSourceRowPrecision]' passed (0.020 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingFastScrollPauseReverseAndSmallFinalTail]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingFastScrollPauseReverseAndSmallFinalTail]' passed (0.028 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRefusesAmbiguousRepeatedRows]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRefusesAmbiguousRepeatedRows]' passed (0.002 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRejectsMissingOverlapAndRecoversOnReturn]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRejectsMissingOverlapAndRecoversOnReturn]' passed (0.008 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingWideViewportPreservesSingleRows]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingWideViewportPreservesSingleRows]' passed (0.012 seconds).
+Test Suite 'FrameStitcherTests' passed at 2026-09-30 19:51:46.543.
+	 Executed 22 tests, with 0 failures (0 unexpected) in 0.845 (0.847) seconds
+Test Suite 'LongScreenShotPackageTests.xctest' passed at 2026-09-30 19:51:46.543.
+	 Executed 22 tests, with 0 failures (0 unexpected) in 0.845 (0.847) seconds
+Test Suite 'All tests' passed at 2026-09-30 19:51:46.543.
+	 Executed 22 tests, with 0 failures (0 unexpected) in 0.845 (0.848) seconds
+RetinaProfile copyMS=127.30474676936865 signatureMS=385.82066958770156 trackingMS=140.1769556105137
+RetinaPipeline frames=120 meanMS=5.648935411591083 peakBacklogMS=0.0 queuedMiB=0.0
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

@@ -1,4 +1,5 @@
 import AppKit
+import Accelerate
 import CoreImage
 import CoreMedia
 import CoreGraphics
@@ -16,9 +17,13 @@ let LONG_CAPTURE_DEBUG_LOG_ENABLED = true
 enum LongCaptureError: LocalizedError {
     case captureFailed
     case notScrollable
+    case processingOverloaded
+    case overlapLost
 
     var errorDescription: String? {
         switch self {
+        case .overlapLost: return "检测到无法确认的拼接缺口，未导出不完整长图。请重新截图；出现重叠不足提示时，先回滚接续再完成。"
+        case .processingOverloaded: return "采集速度超过处理能力，已停止以避免丢帧。请缩小选区后重新截图。"
         case .captureFailed: return "无法采集滚动截图帧。请重新框选可滚动内容区域后再试。"
         case .notScrollable: return "没有检测到页面滚动。请把鼠标放在可滚动内容内，并确认页面尚未到底。"
         }
@@ -436,7 +441,7 @@ private enum PendingRecoveryResolution: Equatable {
     case rejected
 }
 
-private struct LongCaptureCanvasPlacement {
+struct LongCaptureCanvasPlacement {
     let image: CGImage
     /// 原始 viewport 在文档坐标中的顶部。
     let topOffset: Int
@@ -446,9 +451,10 @@ private struct LongCaptureCanvasPlacement {
     let sourceStart: Int
     let sourceHeight: Int
     let serial: Int
+    var imageSourceStart: Int? = nil
 }
 
-private struct LongCaptureCanvasSnapshot {
+struct LongCaptureCanvasSnapshot {
     let width: Int
     let height: Int
     let placements: [LongCaptureCanvasPlacement]
@@ -476,7 +482,7 @@ private struct LongCaptureCanvasSnapshot {
         // 也就是用户看到的密集横向白线/黑线。这里每个 placement 只画：
         // 1. 接缝前少量安全回补；2. 本帧真正新增的尾部内容。
         for placement in placements.sorted(by: { $0.serial < $1.serial }) {
-            let start = min(placement.image.height - 1, max(0, placement.sourceStart))
+            let start = min(placement.image.height - 1, max(0, placement.imageSourceStart ?? placement.sourceStart))
             let height = min(placement.image.height - start, max(1, placement.sourceHeight))
             guard let patch = placement.image.cropping(to: CGRect(
                 x: 0,
@@ -484,7 +490,7 @@ private struct LongCaptureCanvasSnapshot {
                 width: placement.image.width,
                 height: height
             )) else { continue }
-            let destinationTop = placement.topOffset + start
+            let destinationTop = placement.topOffset + placement.sourceStart
             let drawY = CGFloat(outputHeight) - CGFloat(destinationTop + height) * scale
             context.draw(
                 patch,
@@ -500,14 +506,14 @@ private struct LongCaptureCanvasSnapshot {
     }
 }
 
-private enum LongCaptureCanvasPlaceResult {
+enum LongCaptureCanvasPlaceResult {
     case placed(sourceStart: Int, sourceHeight: Int)
     case skippedTooClose
     case skippedDuplicate
     case rejected
 }
 
-private final class LongCaptureCanvasAccumulator {
+final class LongCaptureCanvasAccumulator {
     let width: Int
     let frameHeight: Int
     let maximumHeight: Int
@@ -784,7 +790,8 @@ private final class LongCaptureCanvasAccumulator {
         topOffset rawTopOffset: Int,
         minimumStep: Int = 0,
         force: Bool = false,
-        signature: FrameMatcher.FrameSignature? = nil
+        signature: FrameMatcher.FrameSignature? = nil,
+        visuallyVerified: Bool = false
     ) -> LongCaptureCanvasPlaceResult {
         guard frame.width == width, frame.height == frameHeight else { return .rejected }
         let topOffset = max(0, rawTopOffset)
@@ -852,13 +859,13 @@ private final class LongCaptureCanvasAccumulator {
         // `force` may bypass the placement granularity for the last small strip, but
         // it must never bypass duplicate detection. Bypassing both was what allowed a
         // repeated footer to be appended when Done was pressed.
-        if isDuplicateFrameSignature(signature, tailGrowth: tailGrowth) {
+        if !visuallyVerified && isDuplicateFrameSignature(signature, tailGrowth: tailGrowth) {
             return .skippedDuplicate
         }
-        if isElasticDuplicateFrameSignature(signature, tailGrowth: tailGrowth) {
+        if !visuallyVerified && isElasticDuplicateFrameSignature(signature, tailGrowth: tailGrowth) {
             return .skippedDuplicate
         }
-        if isDuplicateTailPatch(
+        if !visuallyVerified && isDuplicateTailPatch(
             frame: frame,
             topOffset: topOffset,
             sourceStart: sourceStart,
@@ -868,18 +875,31 @@ private final class LongCaptureCanvasAccumulator {
             return .skippedDuplicate
         }
 
+        // Store only the new strip after visual verification, otherwise a 1px
+        // movement would retain an entire Retina viewport for every source row.
+        let storedImage: CGImage
+        if visuallyVerified {
+            guard let patch = FrameStitcher.copyRange(from: frame, sourceStart: sourceStart, height: sourceHeight) else {
+                return .rejected
+            }
+            storedImage = patch
+        } else {
+            storedImage = frame
+        }
         serial += 1
         placements.append(LongCaptureCanvasPlacement(
-            image: frame,
+            image: storedImage,
             topOffset: topOffset,
             sourceStart: sourceStart,
             sourceHeight: sourceHeight,
-            serial: serial
+            serial: serial,
+            imageSourceStart: visuallyVerified ? 0 : nil
         ))
         lastAppendPlacementIndex = placements.count - 1
         contentHeight = nextHeight
         frameCount += 1
         lastPlacedTopOffset = topOffset
+        if visuallyVerified { return .placed(sourceStart: sourceStart, sourceHeight: sourceHeight) }
         let fingerprintSampleHeight = min(sourceHeight, max(140, min(520, frame.height / 3)))
         let newTailFingerprint = Self.patchFingerprint(
             in: frame,
@@ -1164,16 +1184,138 @@ final class LongCapturePreviewSegmentStore {
     }
 }
 
-// MARK: - v8 滚动坐标长截图
+// MARK: - 连续视觉定位长截图
 
-/// v8 不再把“全局 NCC 猜到的位移”当作文档坐标。
-///
-/// 精确触控板滚动事件的 delta 单位是屏幕 point，ScreenCaptureKit 帧是 backing pixel，
-/// 因此文档顶部坐标可直接由 `累计滚动 point × backingScale` 得到。图像匹配只负责验证
-/// 这段滚动是否真的发生，以及页面是否已经到底；它不再有权把多个相似大图压到同一位置。
-///
-/// 整条处理链运行在独立串行队列，主线程只接收已经缩小的预览 tile，避免旧实现中
-/// `canvas.place`/指纹计算占用主线程后产生 300~500ms 历史帧，随后断链。
+/// Tracks rendered pixels, independently of wheel acceleration, browser smooth
+/// scrolling, event delivery delays and pauses. Failed matches never move the anchor.
+final class VisualScrollTracker {
+    enum Update: Equatable {
+        case unchanged
+        case matched(top: Int, movement: Int)
+        case unmatched
+    }
+
+    private var anchor: FrameMatcher.FrameSignature
+    private var anchorSamples: Samples
+    private(set) var top = 0
+
+    init(first: FrameMatcher.FrameSignature) {
+        anchor = first
+        anchorSamples = Samples(first.precise)
+    }
+
+    func observe(_ next: FrameMatcher.FrameSignature) -> Update {
+        guard anchor.originalHeight == next.originalHeight,
+              anchor.precise.width == next.precise.width else { return .unmatched }
+        if FrameMatcher.averageDifference(anchor, next) < 0.20 { return .unchanged }
+        let nextSamples = Samples(next.precise)
+        guard let movement = Self.translation(previous: anchor.precise, next: next.precise,
+                                               a: anchorSamples, b: nextSamples),
+              top + movement >= 0 else { return .unmatched }
+        if movement == 0 { return .unchanged }
+        top += movement
+        anchor = next
+        anchorSamples = nextSamples
+        return .matched(top: top, movement: movement)
+    }
+
+    /// Horizontal samples retain EVERY source row. Prefix sums make the NCC
+    /// normalization O(1) for each displacement; Accelerate computes the dot product
+    /// in optimized native code even when this application is built with Swift -Onone.
+    private struct Samples {
+        let width: Int
+        let pixels: [Float]
+        let sums: [Double]
+        let squares: [Double]
+
+        init(_ frame: FrameMatcher.GrayFrame) {
+            let inset = max(1, frame.width / 12)
+            let columns = Array(stride(from: inset, to: frame.width - inset, by: 4))
+            width = columns.count
+            var values = [Float]()
+            values.reserveCapacity(width * frame.height)
+            var rowSums = [Double](repeating: 0, count: frame.height + 1)
+            var rowSquares = rowSums
+            for row in 0..<frame.height {
+                var sum = 0.0, square = 0.0
+                for x in columns {
+                    let value = Double(frame.pixels[row * frame.width + x])
+                    values.append(Float(value))
+                    sum += value
+                    square += value * value
+                }
+                rowSums[row + 1] = rowSums[row] + sum
+                rowSquares[row + 1] = rowSquares[row] + square
+            }
+            pixels = values
+            sums = rowSums
+            squares = rowSquares
+        }
+    }
+
+    static func translation(previous a: FrameMatcher.GrayFrame,
+                            next b: FrameMatcher.GrayFrame) -> Int? {
+        guard a.width == b.width, a.height == b.height, a.height >= 32 else { return nil }
+        return translation(previous: a, next: b, a: Samples(a), b: Samples(b))
+    }
+
+    private static func translation(previous a: FrameMatcher.GrayFrame,
+                                    next b: FrameMatcher.GrayFrame,
+                                    a samplesA: Samples, b samplesB: Samples) -> Int? {
+        let limit = Int(Double(a.height) * 0.82)
+        let inset = max(2, a.height / 12)
+        var scores: [(shift: Int, score: Double)] = []
+        scores.reserveCapacity(limit * 2 + 1)
+        samplesA.pixels.withUnsafeBufferPointer { aBuffer in
+            samplesB.pixels.withUnsafeBufferPointer { bBuffer in
+                guard let ap = aBuffer.baseAddress, let bp = bBuffer.baseAddress else { return }
+                for shift in -limit...limit {
+                    // Exclude fixed header/footer bands in BOTH viewports.
+                    let aStart = inset + max(0, shift)
+                    let bStart = inset + max(0, -shift)
+                    let rows = a.height - 2 * inset - abs(shift)
+                    guard rows >= max(24, a.height / 20) else { continue }
+                    let count = rows * samplesA.width
+                    let n = Double(count)
+                    let sa = samplesA.sums[aStart + rows] - samplesA.sums[aStart]
+                    let sb = samplesB.sums[bStart + rows] - samplesB.sums[bStart]
+                    let saa = samplesA.squares[aStart + rows] - samplesA.squares[aStart]
+                    let sbb = samplesB.squares[bStart + rows] - samplesB.squares[bStart]
+                    let va = n * saa - sa * sa, vb = n * sbb - sb * sb
+                    guard n >= 32, va > n * n * 16, vb > n * n * 16 else { continue }
+                    var dot: Float = 0
+                    vDSP_dotpr(ap + aStart * samplesA.width, 1,
+                                bp + bStart * samplesB.width, 1, &dot, vDSP_Length(count))
+                    let score = max(0, 1 - (n * Double(dot) - sa * sb) / sqrt(va * vb)) * 100
+                    scores.append((shift, score))
+                }
+            }
+        }
+        guard let best = scores.min(by: { $0.score < $1.score }), best.score < 4 else { return nil }
+        // Separate repeating rows/cards are ambiguous even when one match is exact.
+        let alternative = scores.filter { abs($0.shift - best.shift) > 3 }
+            .map(\.score).min() ?? 100
+        guard alternative - best.score >= 1.0 else { return nil }
+        // Verify all rows at a second set of columns, not only search samples.
+        let aStart = max(0, best.shift), bStart = max(0, -best.shift)
+        let lower = max(0, inset - min(aStart, bStart))
+        let upper = a.height - inset - max(aStart, bStart)
+        var error = 0.0, count = 0
+        for row in max(1, lower)..<upper {
+            for x in stride(from: max(1, a.width / 12) + 1,
+                            to: a.width - max(1, a.width / 12), by: 5) {
+                let ai = (aStart + row) * a.width + x
+                let bi = (bStart + row) * b.width + x
+                let ga = Int(a.pixels[ai]) - Int(a.pixels[ai - a.width])
+                let gb = Int(b.pixels[bi]) - Int(b.pixels[bi - b.width])
+                error += Double(abs(ga - gb)); count += 1
+            }
+        }
+        guard count > 0, error / Double(count) < 8 else { return nil }
+        return best.shift
+    }
+}
+
 final class LongCaptureService {
     var onPreview: ((CGImage, Int) -> Void)?
     var onPreviewSegment: ((LongCapturePreviewSegment, Int) -> Void)?
@@ -1183,15 +1325,6 @@ final class LongCaptureService {
         let image: CGImage
         let sequence: Int
         let captureTime: TimeInterval
-        let scrollPosition: CGFloat
-    }
-
-    private struct TrustedFrame {
-        let image: CGImage
-        let signature: FrameMatcher.FrameSignature
-        let topOffset: Int
-        let scrollPosition: CGFloat
-        let sequence: Int
     }
 
     private let snapshot: ScreenSnapshot
@@ -1199,56 +1332,36 @@ final class LongCaptureService {
     private let excludedWindowIDs: Set<CGWindowID>
 
     private let processingQueue = DispatchQueue(
-        label: "longscreenshot.v8.coordinate-processing",
+        label: "longscreenshot.visual-processing",
         qos: .userInitiated
     )
     private let ingressLock = NSLock()
     private var ingressFrames: [CapturedFrame] = []
     private var ingressDrainScheduled = false
+    private var ingressBytes = 0
+    private var ingressOverloaded = false
+    private let ingressByteLimit = 192 * 1024 * 1024
 
     private let stateLock = NSLock()
     private var acceptsFrames = false
     private var cancelled = false
     private var finishing = false
 
-    private let scrollLock = NSLock()
-    private var scrollSamples: [ScrollPositionSample] = []
-    private var totalObservedScroll: CGFloat = 0
-    private var forwardScrollSign: CGFloat = 0
-    private var ignoredReverseScrollCount = 0
-    private var lastScrollEventTime = Date.distantPast
-
     private var captureStream: ScrollCaptureStream?
-    private var globalScrollMonitor: Any?
-    private var localScrollMonitor: Any?
 
     // 以下状态只在 processingQueue 读写。
     private var canvasAccumulator: LongCaptureCanvasAccumulator?
     private var previewStore: LongCapturePreviewSegmentStore?
-    private var trustedFrame: TrustedFrame?
-    private var baselineFrozen = false
-    private var baselineRefreshCount = 0
-    private var baselineLastRefreshTime: TimeInterval = 0
-    private var baselineScrollPosition: CGFloat = 0
-    private var backingScaleY: CGFloat = 1
+    private var visualTracker: VisualScrollTracker?
+    private var overlapLost = false
     private var acceptedFrameCount = 0
     private var lastCommittedSequence = 0
     private var lastObservedSequence = 0
-    private var lastObservedFrame: CGImage?
-    private var lastObservedSignature: FrameMatcher.FrameSignature?
-    private var lastObservedScrollPosition: CGFloat = 0
-    private var bottomEvidenceCount = 0
-    private var bottomLocked = false
     private var rejectedValidationCount = 0
-    private var rejectedGapCount = 0
-    private var duplicateCount = 0
-    private var compactedIngressCount = 0
     private var maximumObservedProcessingAgeMS: Double = 0
     private var lastPreviewFrameCount = 0
     private var previewSerialCounter = 0
     private let maximumOutputHeight = 180_000
-    private let minimumAppendPixels = 72
-    private let maximumMovementRatio: CGFloat = 0.78
     private var completion: ((Result<CGImage, Error>) -> Void)?
 
     init(snapshot: ScreenSnapshot, selection: CGRect, excludedWindowIDs: [CGWindowID]) {
@@ -1280,7 +1393,6 @@ final class LongCaptureService {
             height: Int(geometry.pixelSize.height)
         ) ?? rawFallback
 
-        backingScaleY = max(0.5, geometry.pixelSize.height / max(1, selection.height))
 
         stateLock.lock()
         acceptsFrames = true
@@ -1288,29 +1400,23 @@ final class LongCaptureService {
         finishing = false
         stateLock.unlock()
 
-        scrollLock.lock()
-        totalObservedScroll = 0
-        forwardScrollSign = 0
-        ignoredReverseScrollCount = 0
-        lastScrollEventTime = Date.distantPast
-        scrollSamples = [ScrollPositionSample(
-            time: ProcessInfo.processInfo.systemUptime,
-            position: 0
-        )]
-        scrollLock.unlock()
-
+        ingressLock.lock()
+        ingressOverloaded = false
+        ingressBytes = 0
+        ingressFrames.removeAll()
+        ingressLock.unlock()
         processingQueue.sync {
+            self.overlapLost = false
             self.resetProcessingState(with: fallback)
         }
 
         LongCaptureDiagnostics.shared.beginSession(
-            "v8-coordinate selection=\(LCFormatRect(selection)) display=\(snapshot.displayID)"
+            "visual selection=\(LCFormatRect(selection)) display=\(snapshot.displayID)"
         )
         LongCaptureDiagnostics.shared.log(
-            "v8.start selection=\(LCFormatRect(selection)) fallback=\(fallback.width)x\(fallback.height) sourceRect=\(LCFormatRect(geometry.sourceRect)) pixelSize=\(LCFormatSize(geometry.pixelSize)) backingScaleY=\(String(format: "%.3f", Double(backingScaleY))) excludedWindowIDs=\(Array(excludedWindowIDs).sorted())"
+            "visual.start selection=\(LCFormatRect(selection)) fallback=\(fallback.width)x\(fallback.height) sourceRect=\(LCFormatRect(geometry.sourceRect)) pixelSize=\(LCFormatSize(geometry.pixelSize)) excludedWindowIDs=\(Array(excludedWindowIDs).sorted())"
         )
 
-        installScrollMonitor()
         let stream = ScrollCaptureStream(
             displayID: snapshot.displayID,
             sourceRect: geometry.sourceRect,
@@ -1340,20 +1446,30 @@ final class LongCaptureService {
 
         captureStream?.stop()
         captureStream = nil
-        removeScrollMonitor()
         dispatchStatus("正在生成长图…", isError: false)
 
         processingQueue.async { [weak self] in
             guard let self else { return }
             self.drainIngressFramesOnProcessingQueue()
             guard !self.cancelled else { return }
+            self.ingressLock.lock()
+            let overloaded = self.ingressOverloaded
+            self.ingressLock.unlock()
+            guard !overloaded else {
+                self.finishOnMain(.failure(LongCaptureError.processingOverloaded))
+                return
+            }
+            guard !self.overlapLost else {
+                self.finishOnMain(.failure(LongCaptureError.overlapLost))
+                return
+            }
             guard let snapshot = self.canvasAccumulator?.snapshot(),
                   let image = snapshot.makeImage() else {
                 self.finishOnMain(.failure(LongCaptureError.captureFailed))
                 return
             }
             LongCaptureDiagnostics.shared.log(
-                "v8.finish acceptedFrames=\(self.acceptedFrameCount) height=\(snapshot.height) lastCommittedSeq=\(self.lastCommittedSequence) lastObservedSeq=\(self.lastObservedSequence) bottomLocked=\(self.bottomLocked) rejectedValidation=\(self.rejectedValidationCount) rejectedGap=\(self.rejectedGapCount) duplicates=\(self.duplicateCount) compactedIngress=\(self.compactedIngressCount) maxAgeMS=\(String(format: "%.1f", self.maximumObservedProcessingAgeMS))"
+                "visual.finish acceptedFrames=\(self.acceptedFrameCount) height=\(snapshot.height) lastCommittedSeq=\(self.lastCommittedSequence) lastObservedSeq=\(self.lastObservedSequence) rejectedValidation=\(self.rejectedValidationCount) maxAgeMS=\(String(format: "%.1f", self.maximumObservedProcessingAgeMS))"
             )
             self.finishOnMain(.success(image))
         }
@@ -1366,9 +1482,9 @@ final class LongCaptureService {
         acceptsFrames = false
         completion = nil
         stateLock.unlock()
-        LongCaptureDiagnostics.shared.log("v8.cancel")
+        LongCaptureDiagnostics.shared.log("visual.cancel")
         stopCaptureResources(clearCallbacks: true)
-        LongCaptureDiagnostics.shared.endSession("v8 cancelled")
+        LongCaptureDiagnostics.shared.endSession("visual cancelled")
     }
 
     private func resetProcessingState(with fallback: CGImage) {
@@ -1380,33 +1496,11 @@ final class LongCaptureService {
             firstFrame: fallback,
             targetWidth: previewMaximumWidth
         )
-        if let signature = FrameMatcher.signature(fallback) {
-            trustedFrame = TrustedFrame(
-                image: fallback,
-                signature: signature,
-                topOffset: 0,
-                scrollPosition: 0,
-                sequence: 0
-            )
-        } else {
-            trustedFrame = nil
-        }
-        baselineFrozen = false
-        baselineRefreshCount = 0
-        baselineLastRefreshTime = 0
-        baselineScrollPosition = 0
+        visualTracker = FrameMatcher.signature(fallback).map { VisualScrollTracker(first: $0) }
         acceptedFrameCount = 1
         lastCommittedSequence = 0
         lastObservedSequence = 0
-        lastObservedFrame = fallback
-        lastObservedSignature = trustedFrame?.signature
-        lastObservedScrollPosition = 0
-        bottomEvidenceCount = 0
-        bottomLocked = false
         rejectedValidationCount = 0
-        rejectedGapCount = 0
-        duplicateCount = 0
-        compactedIngressCount = 0
         maximumObservedProcessingAgeMS = 0
         lastPreviewFrameCount = 0
         previewSerialCounter = 0
@@ -1446,66 +1540,46 @@ final class LongCaptureService {
     private func receiveStreamFrame(_ image: CGImage, sequence: Int, captureTime: TimeInterval) {
         stateLock.lock()
         let canAccept = acceptsFrames && !cancelled
-        stateLock.unlock()
-        guard canAccept else { return }
+        guard canAccept else { stateLock.unlock(); return }
 
-        let scrollPosition = scrollPosition(at: captureTime)
         var scheduleDrain = false
         ingressLock.lock()
         let frame = CapturedFrame(
             image: image,
             sequence: sequence,
-            captureTime: captureTime,
-            scrollPosition: scrollPosition
+            captureTime: captureTime
         )
 
-        // 同一滚动坐标只保留最新显示帧，网页动画/图片解码不会制造大量无意义 backlog。
-        if let last = ingressFrames.last,
-           abs(last.scrollPosition - frame.scrollPosition) < 0.25 {
-            ingressFrames[ingressFrames.count - 1] = frame
-        } else {
-            ingressFrames.append(frame)
+        // Wheel coordinates are not rendered positions. Preserve every intermediate
+        // frame, including animation frames after the last wheel event.
+        let bytes = image.bytesPerRow * image.height
+        guard !ingressOverloaded, ingressBytes + bytes <= ingressByteLimit else {
+            LongCaptureDiagnostics.shared.log("visual.ingress.overloaded seq=\(sequence) queuedFrames=\(ingressFrames.count) queuedBytes=\(ingressBytes) frameBytes=\(bytes) limit=\(ingressByteLimit)")
+            ingressOverloaded = true
+            ingressLock.unlock()
+            acceptsFrames = false
+            stateLock.unlock()
+            DispatchQueue.main.async { [weak self] in
+                self?.captureStream?.stop()
+                self?.captureStream = nil
+            }
+            dispatchStatus("处理积压，已停止采集以避免丢帧。请缩小选区重试。", isError: true)
+            return
         }
-        compactIngressIfNeeded(frameHeight: image.height)
+        ingressFrames.append(frame)
+        ingressBytes += bytes
         if !ingressDrainScheduled {
             ingressDrainScheduled = true
             scheduleDrain = true
         }
         ingressLock.unlock()
+        stateLock.unlock()
 
         if scheduleDrain {
             processingQueue.async { [weak self] in
                 self?.drainIngressFramesOnProcessingQueue()
             }
         }
-    }
-
-    /// 保证相邻保留帧的滚动距离小于约 24% viewport；即使处理短暂落后，
-    /// 也不会像旧版 takeLatest/bridgePick 一样直接挖掉整段图片。
-    private func compactIngressIfNeeded(frameHeight: Int) {
-        guard ingressFrames.count > 18 else { return }
-        let maximumScrollGap = CGFloat(frameHeight) * 0.24 / max(0.5, backingScaleY)
-        var compacted: [CapturedFrame] = []
-        compacted.reserveCapacity(18)
-        for frame in ingressFrames {
-            guard let last = compacted.last else {
-                compacted.append(frame)
-                continue
-            }
-            if frame.scrollPosition - last.scrollPosition >= maximumScrollGap {
-                compacted.append(frame)
-            } else if frame.sequence == ingressFrames.last?.sequence {
-                compacted.append(frame)
-            }
-        }
-        if compacted.count > 18 {
-            compacted = Array(compacted.suffix(18))
-        }
-        compactedIngressCount += max(0, ingressFrames.count - compacted.count)
-        LongCaptureDiagnostics.shared.log(
-            "v8.ingress.compact before=\(ingressFrames.count) after=\(compacted.count) maxScrollGap=\(String(format: "%.1f", Double(maximumScrollGap))) totalCompacted=\(compactedIngressCount)"
-        )
-        ingressFrames = compacted
     }
 
     private func drainIngressFramesOnProcessingQueue() {
@@ -1517,10 +1591,20 @@ final class LongCaptureService {
                 frame = nil
             } else {
                 frame = ingressFrames.removeFirst()
+                if let frame { ingressBytes -= frame.image.bytesPerRow * frame.image.height }
             }
             ingressLock.unlock()
             guard let frame else { break }
+            let began = ProcessInfo.processInfo.systemUptime
             process(frame)
+            let elapsedMS = (ProcessInfo.processInfo.systemUptime - began) * 1000
+            if frame.sequence <= 5 || frame.sequence % 60 == 0 || elapsedMS > 33 {
+                ingressLock.lock()
+                let queued = ingressFrames.count
+                let bytes = ingressBytes
+                ingressLock.unlock()
+                LongCaptureDiagnostics.shared.log("visual.process seq=\(frame.sequence) durationMS=\(String(format: "%.2f", elapsedMS)) queuedFrames=\(queued) queuedMiB=\(String(format: "%.1f", Double(bytes) / 1048576))")
+            }
         }
     }
 
@@ -1533,199 +1617,49 @@ final class LongCaptureService {
         let ageMS = max(0, ProcessInfo.processInfo.systemUptime - frame.captureTime) * 1000
         maximumObservedProcessingAgeMS = max(maximumObservedProcessingAgeMS, ageMS)
         lastObservedSequence = frame.sequence
-        lastObservedFrame = frame.image
-        lastObservedScrollPosition = frame.scrollPosition
 
         guard let signature = FrameMatcher.signature(frame.image) else {
-            LongCaptureDiagnostics.shared.log("v8.frame.signatureFailed seq=\(frame.sequence)")
+            overlapLost = true
+            LongCaptureDiagnostics.shared.log("visual.frame.signatureFailed seq=\(frame.sequence)")
             return
         }
-        lastObservedSignature = signature
 
-        // 用户尚未开始滚动时，用最新 SCStream 帧持续替换 snapshot 首屏。
-        if !baselineFrozen {
-            if frame.scrollPosition <= 0.75 {
-                let elapsed = frame.captureTime - baselineLastRefreshTime
-                if baselineRefreshCount == 0 || elapsed >= 0.045 {
-                    replaceBaseline(with: frame, signature: signature)
-                }
-                return
-            }
-            baselineFrozen = true
-            baselineScrollPosition = 0
-            LongCaptureDiagnostics.shared.log(
-                "v8.baseline.freeze seq=\(frame.sequence) refreshes=\(baselineRefreshCount) scroll=\(String(format: "%.2f", Double(frame.scrollPosition)))"
-            )
-        }
-
-        guard let trusted = trustedFrame,
+        guard let tracker = visualTracker,
               let accumulator = canvasAccumulator else { return }
-
-        let relativeScroll = max(0, frame.scrollPosition - baselineScrollPosition)
-        let coordinateTop = max(0, Int(round(relativeScroll * backingScaleY)))
-        let expectedMovement = coordinateTop - trusted.topOffset
-        guard expectedMovement > 0 else { return }
-
-        let frameHeight = max(1, frame.image.height)
-        if bottomLocked {
-            LongCaptureDiagnostics.shared.log(
-                "v8.bottom.ignore seq=\(frame.sequence) expected=\(expectedMovement) scroll=\(String(format: "%.2f", Double(frame.scrollPosition)))"
-            )
+        switch tracker.observe(signature) {
+        case .unchanged:
+            overlapLost = false
+            // A pause is not proof of the document bottom. Keep accepting frames.
             return
-        }
-
-        // 还没积累到足够新增像素时不做昂贵验证；下一帧仍以最后 committed 帧为锚。
-        guard expectedMovement >= minimumAppendPixels else { return }
-
-        let maximumMovement = Int(CGFloat(frameHeight) * maximumMovementRatio)
-        guard expectedMovement <= maximumMovement else {
-            rejectedGapCount += 1
-            LongCaptureDiagnostics.shared.log(
-                "v8.reject.noOverlap seq=\(frame.sequence) expected=\(expectedMovement) max=\(maximumMovement) trustedSeq=\(trusted.sequence) ageMS=\(String(format: "%.1f", ageMS))"
-            )
-            dispatchStatus("滚动过快，正在等待可衔接帧…", isError: false)
-            return
-        }
-
-        let tolerance = max(12, min(70, Int(CGFloat(expectedMovement) * 0.12)))
-        let validation = FrameMatcher.validateExpectedMovement(
-            previous: trusted.signature,
-            next: signature,
-            expectedMovement: expectedMovement,
-            tolerance: tolerance
-        )
-        let visualDelta = FrameMatcher.averageDifference(trusted.signature, signature)
-        let elastic = FrameMatcher.elasticShiftDifference(
-            previous: trusted.signature,
-            next: signature,
-            maximumShiftRatio: 0.16
-        )
-
-        let bestNearExpected = abs(validation.bestMovement - expectedMovement) <= tolerance
-        let elasticMovement = abs(elastic.shift)
-        let elasticExplainsFrame = elastic.score <= 8.0
-            && elasticMovement + 24 < Int(CGFloat(expectedMovement) * 0.58)
-        let stillFrame = visualDelta <= 0.28
-        let expectedEvidence = bestNearExpected && (
-            validation.score <= 58.0
-            || (validation.score <= 72.0 && validation.gradientScore <= 17.5)
-        )
-        let coordinateFallbackEvidence = visualDelta >= 9.5
-            && expectedMovement <= Int(CGFloat(frameHeight) * 0.70)
-            && !elasticExplainsFrame
-
-        if stillFrame || elasticExplainsFrame {
-            bottomEvidenceCount += 1
-            LongCaptureDiagnostics.shared.log(
-                "v8.reject.bottomLike seq=\(frame.sequence) expected=\(expectedMovement) visual=\(String(format: "%.2f", visualDelta)) elasticScore=\(String(format: "%.2f", elastic.score)) elasticShift=\(elastic.shift) validationScore=\(String(format: "%.2f", validation.score)) evidence=\(bottomEvidenceCount)"
-            )
-            if bottomEvidenceCount >= 4 {
-                bottomLocked = true
-                dispatchStatus("已到达页面底部", isError: false)
-                LongCaptureDiagnostics.shared.log(
-                    "v8.bottom.lock seq=\(frame.sequence) contentHeight=\(accumulator.contentHeight) scroll=\(String(format: "%.2f", Double(frame.scrollPosition)))"
-                )
-            }
-            return
-        }
-
-        guard expectedEvidence || coordinateFallbackEvidence else {
+        case .unmatched:
+            overlapLost = true
             rejectedValidationCount += 1
-            bottomEvidenceCount = 0
-            LongCaptureDiagnostics.shared.log(
-                "v8.reject.validation seq=\(frame.sequence) expected=\(expectedMovement) best=\(validation.bestMovement) tolerance=\(tolerance) score=\(String(format: "%.2f", validation.score)) gradient=\(String(format: "%.2f", validation.gradientScore)) margin=\(String(format: "%.2f", validation.margin)) visual=\(String(format: "%.2f", visualDelta)) ageMS=\(String(format: "%.1f", ageMS))"
-            )
+            dispatchStatus("重叠不足或内容不明确，请向上滚回已采集位置后继续", isError: false)
             return
-        }
-
-        // 文档坐标只采用滚动事件推导值。图像匹配仅验证，不再把 6 张相似大图
-        // 错配得到的 700/900px 位移写回坐标。
-        let placementTop = coordinateTop
-        guard placementTop <= accumulator.contentHeight else {
-            rejectedGapCount += 1
-            LongCaptureDiagnostics.shared.log(
-                "v8.reject.canvasGap seq=\(frame.sequence) top=\(placementTop) contentHeight=\(accumulator.contentHeight) gap=\(placementTop - accumulator.contentHeight) expected=\(expectedMovement)"
+        case let .matched(top, movement):
+            overlapLost = false
+            guard top + frame.image.height > accumulator.contentHeight else { return }
+            let placeResult = accumulator.place(
+                frame.image, topOffset: top, minimumStep: 1,
+                signature: signature, visuallyVerified: true
             )
-            return
-        }
-
-        let placeResult = accumulator.place(
-            frame.image,
-            topOffset: placementTop,
-            minimumStep: minimumAppendPixels,
-            force: false,
-            signature: signature
-        )
-        switch placeResult {
-        case let .placed(sourceStart, sourceHeight):
-            bottomEvidenceCount = 0
-            acceptedFrameCount = accumulator.frameCount
-            lastCommittedSequence = frame.sequence
-            trustedFrame = TrustedFrame(
-                image: frame.image,
-                signature: signature,
-                topOffset: placementTop,
-                scrollPosition: frame.scrollPosition,
-                sequence: frame.sequence
-            )
-            previewStore?.place(
-                frame.image,
-                topOffset: placementTop,
-                sourceStart: sourceStart,
-                sourceHeight: sourceHeight
-            )
-            publishPendingPreviewSegments(reason: "placement")
-            LongCaptureDiagnostics.shared.log(
-                "v8.canvas.place seq=\(frame.sequence) top=\(placementTop) expected=\(expectedMovement) validatedBest=\(validation.bestMovement) sourceStart=\(sourceStart) sourceHeight=\(sourceHeight) contentHeight=\(accumulator.contentHeight) score=\(String(format: "%.2f", validation.score)) gradient=\(String(format: "%.2f", validation.gradientScore)) visual=\(String(format: "%.2f", visualDelta)) fallback=\(!expectedEvidence) ageMS=\(String(format: "%.1f", ageMS))"
-            )
-            dispatchStatus("已采集 \(acceptedFrameCount) 段", isError: false)
-
-        case .skippedTooClose:
-            break
-
-        case .skippedDuplicate:
-            duplicateCount += 1
-            bottomEvidenceCount += 1
-            LongCaptureDiagnostics.shared.log(
-                "v8.canvas.skipDuplicate seq=\(frame.sequence) duplicate=\(duplicateCount) evidence=\(bottomEvidenceCount) top=\(placementTop) contentHeight=\(accumulator.contentHeight)"
-            )
-            if bottomEvidenceCount >= 3 {
-                bottomLocked = true
-                dispatchStatus("已到达页面底部", isError: false)
+            switch placeResult {
+            case let .placed(sourceStart, sourceHeight):
+                acceptedFrameCount = accumulator.frameCount
+                lastCommittedSequence = frame.sequence
+                previewStore?.place(frame.image, topOffset: top,
+                                    sourceStart: sourceStart, sourceHeight: sourceHeight)
+                publishPendingPreviewSegments(reason: "visual-placement")
+                LongCaptureDiagnostics.shared.log(
+                    "visual.place seq=\(frame.sequence) top=\(top) movement=\(movement) height=\(accumulator.contentHeight) ageMS=\(String(format: "%.1f", ageMS))"
+                )
+                dispatchStatus("已采集 \(acceptedFrameCount) 段", isError: false)
+            case .rejected:
+                dispatchStatus("已达到长图尺寸上限，请完成当前截图", isError: false)
+            case .skippedDuplicate, .skippedTooClose:
+                break
             }
-
-        case .rejected:
-            rejectedGapCount += 1
-            LongCaptureDiagnostics.shared.log(
-                "v8.canvas.rejected seq=\(frame.sequence) top=\(placementTop) contentHeight=\(accumulator.contentHeight) expected=\(expectedMovement)"
-            )
         }
-    }
-
-    private func replaceBaseline(with frame: CapturedFrame, signature: FrameMatcher.FrameSignature) {
-        canvasAccumulator = LongCaptureCanvasAccumulator(
-            firstFrame: frame.image,
-            maximumHeight: maximumOutputHeight
-        )
-        previewStore = LongCapturePreviewSegmentStore(
-            firstFrame: frame.image,
-            targetWidth: previewMaximumWidth
-        )
-        trustedFrame = TrustedFrame(
-            image: frame.image,
-            signature: signature,
-            topOffset: 0,
-            scrollPosition: 0,
-            sequence: frame.sequence
-        )
-        acceptedFrameCount = 1
-        lastCommittedSequence = frame.sequence
-        baselineRefreshCount += 1
-        baselineLastRefreshTime = frame.captureTime
-        publishPendingPreviewSegments(reason: "baseline")
-        LongCaptureDiagnostics.shared.log(
-            "v8.baseline.refresh seq=\(frame.sequence) refresh=\(baselineRefreshCount) ageMS=\(String(format: "%.1f", max(0, ProcessInfo.processInfo.systemUptime - frame.captureTime) * 1000))"
-        )
     }
 
     private func publishPendingPreviewSegments(reason: String) {
@@ -1752,78 +1686,18 @@ final class LongCaptureService {
             }
         }
         LongCaptureDiagnostics.shared.log(
-            "v8.preview.publish reason=\(reason) segments=\(segments.count) count=\(count) previewHeight=\(previewStore.previewContentHeight)"
+            "visual.preview.publish reason=\(reason) segments=\(segments.count) count=\(count) previewHeight=\(previewStore.previewContentHeight)"
         )
-    }
-
-    private func installScrollMonitor() {
-        guard globalScrollMonitor == nil, localScrollMonitor == nil else { return }
-        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            DispatchQueue.main.async { self?.receiveScroll(event) }
-        }
-        localScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            self?.receiveScroll(event)
-            return event
-        }
-    }
-
-    private func receiveScroll(_ event: NSEvent) {
-        let globalSelection = selection.offsetBy(
-            dx: snapshot.screen.frame.minX,
-            dy: snapshot.screen.frame.minY
-        )
-        guard globalSelection.contains(NSEvent.mouseLocation) else { return }
-        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 18
-        let rawDelta = event.scrollingDeltaY * multiplier
-        guard abs(rawDelta) > 0.01 else { return }
-
-        scrollLock.lock()
-        if forwardScrollSign == 0 {
-            forwardScrollSign = rawDelta >= 0 ? 1 : -1
-        }
-        let delta = rawDelta * forwardScrollSign
-        if delta <= 0 {
-            ignoredReverseScrollCount += 1
-            scrollLock.unlock()
-            return
-        }
-        totalObservedScroll += delta
-        lastScrollEventTime = Date()
-        let now = ProcessInfo.processInfo.systemUptime
-        scrollSamples.append(ScrollPositionSample(time: now, position: totalObservedScroll))
-        if scrollSamples.count > 256 {
-            let cutoff = now - 3.0
-            scrollSamples.removeAll { $0.time < cutoff }
-        }
-        let total = totalObservedScroll
-        scrollLock.unlock()
-
-        if delta >= 12 || Int(total) % 500 < Int(delta) {
-            LongCaptureDiagnostics.shared.log(
-                "v8.scroll delta=\(String(format: "%.2f", Double(delta))) precise=\(event.hasPreciseScrollingDeltas) total=\(String(format: "%.2f", Double(total)))"
-            )
-        }
-    }
-
-    private func scrollPosition(at captureTime: TimeInterval) -> CGFloat {
-        scrollLock.lock()
-        defer { scrollLock.unlock() }
-        for sample in scrollSamples.reversed() where sample.time <= captureTime + 0.004 {
-            return sample.position
-        }
-        return scrollSamples.first?.position ?? totalObservedScroll
-    }
-
-    private func removeScrollMonitor() {
-        if let globalScrollMonitor { NSEvent.removeMonitor(globalScrollMonitor) }
-        if let localScrollMonitor { NSEvent.removeMonitor(localScrollMonitor) }
-        globalScrollMonitor = nil
-        localScrollMonitor = nil
     }
 
     private func dispatchStatus(_ text: String, isError: Bool) {
         DispatchQueue.main.async { [weak self] in
-            self?.onStatus?(text, isError)
+            guard let self else { return }
+            self.ingressLock.lock()
+            let overloaded = self.ingressOverloaded
+            self.ingressLock.unlock()
+            self.onStatus?(overloaded ? "处理积压，已停止采集以避免丢帧。请缩小选区重试。" : text,
+                           overloaded || isError)
         }
     }
 
@@ -1831,7 +1705,7 @@ final class LongCaptureService {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             LongCaptureDiagnostics.shared.endSession(
-                "v8 finished result=\(result.isSuccess ? "success" : "failure")"
+                "visual finished result=\(result.isSuccess ? "success" : "failure")"
             )
             let callback = self.completion
             self.completion = nil
@@ -1848,9 +1722,9 @@ final class LongCaptureService {
         captureStream?.onError = nil
         captureStream?.stop()
         captureStream = nil
-        removeScrollMonitor()
         ingressLock.lock()
         ingressFrames.removeAll(keepingCapacity: false)
+        ingressBytes = 0
         ingressDrainScheduled = false
         ingressLock.unlock()
         if clearCallbacks {
@@ -1908,13 +1782,41 @@ enum FrameMatcher {
             224,
             max(128, Int(ceil(CGFloat(image.width) / CGFloat(max(1, image.height)) * 145)))
         )
-        guard let coarse = gray(image, targetWidth: aspectAwareWidth),
-              let precise = verticallyPreciseGray(image, targetWidth: 72) else { return nil }
-        return FrameSignature(
-            coarse: coarse,
-            precise: precise,
-            originalHeight: image.height
-        )
+        // CGContext grayscale drawing converts/resamples the large source twice;
+        // on a Retina capture this dominated Debug processing time. Convert once
+        // with vImage, then derive both signatures using native vector kernels.
+        let space = CGColorSpaceCreateDeviceRGB()
+        var format = vImage_CGImageFormat(bitsPerComponent: 8, bitsPerPixel: 32,
+            colorSpace: Unmanaged.passUnretained(space),
+            bitmapInfo: CGBitmapInfo.byteOrder32Little.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)),
+            version: 0, decode: nil, renderingIntent: .defaultIntent)
+        var rgba = vImage_Buffer()
+        guard vImageBuffer_InitWithCGImage(&rgba, &format, nil, image, vImage_Flags(kvImageNoFlags)) == kvImageNoError else { return nil }
+        defer { free(rgba.data) }
+        var pixels = [UInt8](repeating: 0, count: image.width * image.height)
+        let matrix: [Int16] = [29, 150, 77, 0] // BGRA -> luminance; alpha is ignored.
+        return pixels.withUnsafeMutableBytes { bytes in
+            var planar = vImage_Buffer(data: bytes.baseAddress, height: vImagePixelCount(image.height),
+                                       width: vImagePixelCount(image.width), rowBytes: image.width)
+            guard vImageMatrixMultiply_ARGB8888ToPlanar8(&rgba, &planar, matrix, 256, nil, 0,
+                                                        vImage_Flags(kvImageNoFlags)) == kvImageNoError else { return nil }
+            let coarseWidth = min(aspectAwareWidth, image.width)
+            let coarseHeight = max(1, image.height * coarseWidth / image.width)
+            guard let coarse = scaledGray(&planar, width: coarseWidth, height: coarseHeight),
+                  let precise = scaledGray(&planar, width: min(72, image.width), height: image.height) else { return nil }
+            return FrameSignature(coarse: coarse, precise: precise, originalHeight: image.height)
+        }
+    }
+
+    private static func scaledGray(_ source: inout vImage_Buffer, width: Int, height: Int) -> GrayFrame? {
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let status = pixels.withUnsafeMutableBytes { bytes -> vImage_Error in
+            var output = vImage_Buffer(data: bytes.baseAddress, height: vImagePixelCount(height),
+                                      width: vImagePixelCount(width), rowBytes: width)
+            return vImageScale_Planar8(&source, &output, nil, vImage_Flags(kvImageNoFlags))
+        }
+        guard status == kvImageNoError else { return nil }
+        return GrayFrame(width: width, height: height, pixels: pixels)
     }
 
     static func gray(_ image: CGImage, targetWidth: Int = 160) -> GrayFrame? {
@@ -2373,6 +2275,11 @@ enum FrameMatcher {
         next: FrameSignature,
         expectedNewContent: Int? = nil
     ) -> Alignment {
+        if let shift = VisualScrollTracker.translation(previous: previous.precise, next: next.precise), shift > 0 {
+            return Alignment(nextContentStart: 0, overlap: previous.originalHeight - shift,
+                             score: weightedOverlapScore(previous: previous.precise, next: next.precise, displacement: shift),
+                             margin: 1)
+        }
         let a = previous.coarse
         let b = next.coarse
         guard a.width == b.width else {
@@ -2532,7 +2439,7 @@ enum FrameMatcher {
             // The precise score has a different (gradient-error) scale. Reliability is
             // still decided by the coarse NCC; the precise pass only removes vertical
             // quantization from the selected displacement.
-            score: chosenCoarseScore,
+            score: weightedOverlapScore(previous: preciseA, next: preciseB, displacement: preciseDisplacement),
             margin: chosenMargin
         )
     }

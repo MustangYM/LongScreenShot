@@ -350,6 +350,122 @@ final class FrameStitcherTests: XCTestCase {
         XCTAssertLessThan(FrameMatcher.averageDifference(result, expected), 6)
     }
 
+    func testVisualTrackingFastScrollPauseReverseAndSmallFinalTail() throws {
+        let source = try makeFineRowPattern(width: 720, height: 3000)
+        let height = 600
+        func frame(_ top: Int) throws -> CGImage {
+            try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: top, width: 720, height: height)))
+        }
+        let first = try frame(0)
+        let tracker = VisualScrollTracker(first: try XCTUnwrap(FrameMatcher.signature(first)))
+        let canvas = LongCaptureCanvasAccumulator(firstFrame: first, maximumHeight: 180000)
+        var end = height
+        // Includes a 75% viewport jump, a long pause, a reversal and a 7px tail.
+        for top in [120, 450, 900, 900, 900, 900, 900, 900, 810, 900, 1250, 1257] {
+            let image = try frame(top)
+            let result = tracker.observe(try XCTUnwrap(FrameMatcher.signature(image)))
+            XCTAssertNotEqual(result, .unmatched, "top=\(top)")
+            XCTAssertEqual(tracker.top, top)
+            if top + height > end {
+                let placement = canvas.place(image, topOffset: tracker.top,
+                                             signature: FrameMatcher.signature(image), visuallyVerified: true)
+                guard case .placed = placement else { XCTFail("Expected canvas growth"); continue }
+                end = top + height
+            }
+        }
+        let actual = try XCTUnwrap(canvas.snapshot().makeImage())
+        let expected = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0, width: 720, height: end)))
+        XCTAssertEqual(actual.height, 1857)
+        XCTAssertLessThan(FrameMatcher.averageDifference(actual, expected), 0.01)
+    }
+
+    func testVisualTrackingRejectsMissingOverlapAndRecoversOnReturn() throws {
+        let source = try makeFineRowPattern(width: 500, height: 3000)
+        func signature(_ top: Int) throws -> FrameMatcher.FrameSignature {
+            let image = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: top, width: 500, height: 600)))
+            return try XCTUnwrap(FrameMatcher.signature(image))
+        }
+        let tracker = VisualScrollTracker(first: try signature(0))
+        XCTAssertEqual(tracker.observe(try signature(1100)), .unmatched)
+        XCTAssertEqual(tracker.top, 0)
+        XCTAssertEqual(tracker.observe(try signature(240)), .matched(top: 240, movement: 240))
+        XCTAssertEqual(tracker.observe(try signature(600)), .matched(top: 600, movement: 360))
+    }
+
+    func testVisualTrackingRefusesAmbiguousRepeatedRows() throws {
+        let source = try makeTextLikePattern(width: 600, height: 1500)
+        let first = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0, width: 600, height: 600)))
+        let second = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 101, width: 600, height: 600)))
+        let tracker = VisualScrollTracker(first: try XCTUnwrap(FrameMatcher.signature(first)))
+        XCTAssertEqual(tracker.observe(try XCTUnwrap(FrameMatcher.signature(second))), .unmatched)
+        XCTAssertEqual(tracker.top, 0)
+    }
+
+    func testVisualTrackingWideViewportPreservesSingleRows() throws {
+        let source = try makeFineRowPattern(width: 3440, height: 1400)
+        let first = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0, width: 3440, height: 700)))
+        let next = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 455, width: 3440, height: 700)))
+        let tracker = VisualScrollTracker(first: try XCTUnwrap(FrameMatcher.signature(first)))
+        XCTAssertEqual(tracker.observe(try XCTUnwrap(FrameMatcher.signature(next))), .matched(top: 455, movement: 455))
+    }
+
+    // Replays the user's 1948x1458 Retina selection. Run this in Debug too:
+    // Release-only tests hid the scalar NCC bottleneck that filled the ingress queue.
+    func testRetinaCapturePipelineKeepsUpWith60FPSInDebug() throws {
+        let width = 1948, height = 1458
+        let source = try makeFineRowPattern(width: width, height: 4400)
+        func frame(_ top: Int) throws -> CGImage {
+            try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: top, width: width, height: height)))
+        }
+        let first = try frame(0)
+        let tracker = VisualScrollTracker(first: try XCTUnwrap(FrameMatcher.signature(first)))
+        let canvas = LongCaptureCanvasAccumulator(firstFrame: first, maximumHeight: 180000)
+        let preview = LongCapturePreviewSegmentStore(firstFrame: first, targetWidth: 214)
+        // Startup mismatch, stationary frames, then rendered scrolling at 60fps.
+        let positions = Array(repeating: 2200, count: 12) + Array(repeating: 0, count: 12)
+            + Array(stride(from: 12, through: 1152, by: 12))
+        var totalMS = 0.0, backlogMS = 0.0, peakBacklogMS = 0.0
+        var copyMS = 0.0, signatureMS = 0.0, trackingMS = 0.0
+        for (index, position) in positions.enumerated() {
+            let captured = try frame(position)
+            let started = ProcessInfo.processInfo.systemUptime
+            try autoreleasepool {
+                let image = try XCTUnwrap(FrameStitcher.detachedCopy(captured))
+                let copied = ProcessInfo.processInfo.systemUptime
+                copyMS += (copied - started) * 1000
+                let signature = try XCTUnwrap(FrameMatcher.signature(image))
+                let signed = ProcessInfo.processInfo.systemUptime
+                signatureMS += (signed - copied) * 1000
+                let update = tracker.observe(signature)
+                trackingMS += (ProcessInfo.processInfo.systemUptime - signed) * 1000
+                if index < 12 {
+                    XCTAssertEqual(update, .unmatched)
+                } else {
+                    XCTAssertEqual(tracker.top, position)
+                    if position + height > canvas.contentHeight {
+                        guard case let .placed(start, added) = canvas.place(image, topOffset: tracker.top,
+                            signature: signature, visuallyVerified: true) else {
+                            XCTFail("Expected new strip at \(position)"); return
+                        }
+                        preview.place(image, topOffset: tracker.top, sourceStart: start, sourceHeight: added)
+                        _ = preview.drainPendingSegments()
+                    }
+                }
+            }
+            let ms = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            totalMS += ms
+            backlogMS = max(0, backlogMS + ms - 1000.0 / 60)
+            peakBacklogMS = max(peakBacklogMS, backlogMS)
+        }
+        print("RetinaProfile copyMS=\(copyMS) signatureMS=\(signatureMS) trackingMS=\(trackingMS)")
+        let meanMS = totalMS / Double(positions.count)
+        let queuedBytes = ceil(peakBacklogMS / (1000.0 / 60)) * Double(width * height * 4)
+        print("RetinaPipeline frames=\(positions.count) meanMS=\(meanMS) peakBacklogMS=\(peakBacklogMS) queuedMiB=\(queuedBytes / 1048576)")
+        XCTAssertLessThan(meanMS, 1000.0 / 60, "Processing must sustain the configured frame rate, including Debug builds")
+        XCTAssertLessThan(queuedBytes, 192 * 1024 * 1024, "Must not trip the ingress limit at startup")
+        XCTAssertEqual(canvas.contentHeight, height + 1152)
+    }
+
     private func makePattern(width: Int, height: Int) throws -> CGImage {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let context = try XCTUnwrap(CGContext(
