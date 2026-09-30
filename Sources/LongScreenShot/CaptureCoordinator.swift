@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Carbon
 
 struct ScreenSnapshot {
     let screen: NSScreen
@@ -33,6 +34,14 @@ struct WindowCandidate {
 }
 
 enum WindowDetector {
+    static func hasTrackingMenu(in windows: [[String: Any]]) -> Bool {
+        windows.contains { info in
+            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            return layer == Int(CGWindowLevelForKey(.popUpMenuWindow)) && alpha > 0.01
+        }
+    }
+
     static func candidates(in snapshot: ScreenSnapshot) -> [WindowCandidate] {
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
@@ -66,17 +75,59 @@ enum WindowDetector {
     }
 }
 
+/// One session owns one set of overlays, including while activation is pending.
+struct CaptureSessionLifecycle {
+    private enum Phase { case idle, waitingForActivation, presented, finished }
+    private var phase = Phase.idle
+    var isFinished: Bool { phase == .finished }
+
+    mutating func begin() -> Bool {
+        guard phase == .idle else { return false }
+        phase = .waitingForActivation
+        return true
+    }
+
+    mutating func present(applicationIsActive: Bool, menuIsTracking: Bool = false) -> Bool {
+        guard phase == .waitingForActivation, applicationIsActive, !menuIsTracking else { return false }
+        phase = .presented
+        return true
+    }
+
+    mutating func finish() -> Bool {
+        guard phase != .finished else { return false }
+        phase = .finished
+        return true
+    }
+}
+
 final class CaptureCoordinator: NSObject {
     var onFinish: (() -> Void)?
     private var overlayControllers: [OverlayWindowController] = []
     private let initialLongMode: Bool
+    private var lifecycle = CaptureSessionLifecycle()
+    private var escapeHotKey: GlobalHotKey?
+    private var emergencyHotKey: GlobalHotKey?
+    private var keyMonitor: Any?
+    private var activationObservers: [NSObjectProtocol] = []
+    private var activationTimeout: Timer?
+    private let snapshotProvider: (() -> [ScreenSnapshot])?
 
-    init(initialLongMode: Bool) {
+    init(initialLongMode: Bool, snapshotProvider: (() -> [ScreenSnapshot])? = nil) {
         self.initialLongMode = initialLongMode
+        self.snapshotProvider = snapshotProvider
     }
 
-    func start() {
-        let snapshots = NSScreen.screens.compactMap { capture(screen: $0) }
+    deinit { closeOverlays() }
+
+    func cancel() { finish() }
+
+    func start(afterSnapshot: (() -> Void)? = nil) {
+        guard lifecycle.begin() else { return }
+        // Preserve the OPEN menu in the captured pixels before requesting focus.
+        let snapshots = snapshotProvider?() ?? NSScreen.screens.compactMap { capture(screen: $0) }
+        // Only dismiss an app-owned menu once its visible pixels have been retained.
+        // Foreign menus still use the activation/readiness checks below.
+        afterSnapshot?()
         guard !snapshots.isEmpty else {
             finish(); return
         }
@@ -89,7 +140,68 @@ final class CaptureCoordinator: NSObject {
             }
             return controller
         }
+        installExitRoutes()
+        // A foreign menu may keep its tracking grab even after activate() is called.
+        // Do not put an input-blocking overlay on screen until activation succeeds.
+        activationObservers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in self?.presentIfActive() })
+        activationObservers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.overlayControllers.contains(where: { $0.allowsInactiveCapture }) else { return }
+            self.cancel()
+        })
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        let timeout = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if ProcessInfo.processInfo.systemUptime >= deadline { self.cancel() }
+            else { self.presentIfActive() }
+        }
+        activationTimeout = timeout
+        for mode: RunLoop.Mode in [.default, .eventTracking, .modalPanel] {
+            RunLoop.main.add(timeout, forMode: mode)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        presentIfActive()
+    }
+
+    private func presentIfActive() {
+        guard NSApp.isActive else { return }
+        // Status-item menus can hold a tracking grab without changing the active
+        // application. Wait for those real menu windows to disappear as well.
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                       kCGNullWindowID) as? [[String: Any]],
+              lifecycle.present(applicationIsActive: true,
+                                menuIsTracking: WindowDetector.hasTrackingMenu(in: windows)) else { return }
+        activationTimeout?.invalidate()
+        activationTimeout = nil
         overlayControllers.forEach { $0.show() }
+    }
+
+    private func installExitRoutes() {
+        // Register once per session, not once per display. This still works while
+        // the long-capture overlay is inactive and forwards mouse input underneath.
+        escapeHotKey = GlobalHotKey(configuration: HotKeyConfiguration(
+            keyCode: UInt32(kVK_Escape), carbonModifiers: 0
+        )) { [weak self] in self?.cancel() }
+        emergencyHotKey = GlobalHotKey(configuration: HotKeyConfiguration(
+            keyCode: UInt32(kVK_Escape), carbonModifiers: UInt32(cmdKey | shiftKey)
+        )) { [weak self] in self?.cancel() }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if event.keyCode == UInt16(kVK_Escape) {
+                self?.cancel()
+                // Never intercept the operating system's Force Quit shortcut.
+                return modifiers == [.command, .option] ? event : nil
+            }
+            if event.keyCode == UInt16(kVK_ANSI_Q), modifiers == .command {
+                self?.cancel()
+                NSApp.terminate(nil)
+                return nil
+            }
+            return event
+        }
     }
 
     private func screenUnderPointer() -> NSScreen? {
@@ -124,6 +236,7 @@ final class CaptureCoordinator: NSObject {
         sourceScreen: NSScreen,
         toastAnchorRect: CGRect?
     ) {
+        guard !lifecycle.isFinished else { return }
         CaptureHistoryManager.shared.record(image)
         switch action {
         case .copy:
@@ -131,11 +244,13 @@ final class CaptureCoordinator: NSObject {
             FeedbackToast.show(L10n.tr("feedback.copied"), screen: sourceScreen, anchorRect: toastAnchorRect)
             finish()
         case .save:
+            closeOverlays()
             ImageExporter.showSavePanel(for: image, preferredScreen: sourceScreen) { [weak self] in self?.finish() }
         case .pin:
             PinWindowController.pin(image: image)
             finish()
         case .ocr:
+            closeOverlays()
             OCRService.recognize(image: image) { [weak self] text in
                 if !text.isEmpty {
                     NSPasteboard.general.clearContents()
@@ -145,6 +260,7 @@ final class CaptureCoordinator: NSObject {
                 self?.finish()
             }
         case .translate:
+            closeOverlays()
             OCRService.recognize(image: image) { [weak self] text in
                 self?.translate(image: image, text: text)
             }
@@ -177,16 +293,29 @@ final class CaptureCoordinator: NSObject {
     }
 
     private func closeOverlays() {
-        overlayControllers.forEach { $0.close() }
+        activationTimeout?.invalidate()
+        activationTimeout = nil
+        activationObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        activationObservers.removeAll()
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        escapeHotKey = nil
+        emergencyHotKey = nil
+        // First release EVERY display, then perform potentially expensive cleanup.
+        let controllers = overlayControllers
         overlayControllers.removeAll()
+        controllers.forEach { $0.releaseInput() }
+        controllers.forEach { $0.close() }
     }
 
     private func finish() {
+        guard lifecycle.finish() else { return }
         closeOverlays()
-        NSApp.activate(ignoringOtherApps: true)
-        onFinish?()
+        let callback = onFinish
         onFinish = nil
+        callback?()
     }
+
 }
 
 enum CaptureCompletionAction {

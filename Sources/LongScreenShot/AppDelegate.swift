@@ -143,10 +143,12 @@ private enum StatusBarIconFactory {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: GlobalHotKey?
     private var captureCoordinator: CaptureCoordinator?
+    private let statusPopover = NSPopover()
+    private var statusMenuModel = NSMenu()
     private var settingsController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -194,7 +196,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let menu = NSMenu()
-        menu.delegate = self
         menu.addItem(withTitle: L10n.tr("menu.capture"), action: #selector(startCapture), keyEquivalent: "")
         menu.addItem(withTitle: L10n.tr("menu.longCapture"), action: #selector(startLongCapture), keyEquivalent: "")
         menu.addItem(withTitle: L10n.tr("menu.history"), action: #selector(showHistory), keyEquivalent: "")
@@ -206,23 +207,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: L10n.tr("menu.quit"), action: #selector(quit), keyEquivalent: "q")
         for item in menu.items { item.target = self }
-        statusItem.menu = menu
+        statusMenuModel = menu
+        // NSMenu tracking captures keyboard dispatch inside this process. A popover
+        // keeps the normal application event loop running while these actions are visible.
+        statusItem.menu = nil
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(toggleStatusPopover)
+        statusPopover.behavior = .transient
+        statusPopover.animates = false
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        menu.items.first?.keyEquivalent = ""
-        menu.items.first?.keyEquivalentModifierMask = []
-        menu.items.first?.title = "\(L10n.tr("menu.capture"))    \(HotKeyConfiguration.current.displayString)"
+    @objc private func toggleStatusPopover() {
+        if statusPopover.isShown {
+            statusPopover.close()
+            return
+        }
+        guard let button = statusItem.button, captureCoordinator == nil else { return }
+        statusMenuModel.items.first?.title = "\(L10n.tr("menu.capture"))    \(HotKeyConfiguration.current.displayString)"
+        let content = StatusPopoverContent(menu: statusMenuModel)
+        content.onSelect = { [weak self] item in
+            guard let self else { return }
+            self.statusPopover.close()
+            if let action = item.action { NSApp.sendAction(action, to: item.target, from: item) }
+        }
+        content.onCancel = { [weak self] in self?.statusPopover.close() }
+        statusPopover.contentViewController = content
+        statusPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        LongCaptureDiagnostics.shared.log("shortcut.popover.open")
     }
 
     @objc private func registerHotKey() {
         hotKey = nil
         hotKey = GlobalHotKey(configuration: .current) { [weak self] in
-            self?.beginCapture(longMode: false)
+            guard let self else { return }
+            if let capture = self.captureCoordinator { capture.cancel() }
+            else { self.beginCapture(longMode: false, preservingPopover: self.statusPopover.isShown) }
         }
     }
 
     @objc private func appLanguageDidChange() {
+        statusPopover.close()
         configureStatusItem()
         settingsController?.refreshLanguage()
     }
@@ -232,20 +256,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func checkForUpdates() { UpdateChecker.shared.checkForUpdates(userInitiated: true) }
     @objc private func showHistory() { CaptureHistoryWindowController.shared.showAtPointer() }
 
-    private func beginCapture(longMode: Bool) {
+    private func beginCapture(longMode: Bool, preservingPopover: Bool = false) {
         guard captureCoordinator == nil else { return }
         guard ScreenCaptureAuthorization.ensureAuthorized() else {
             showPermissionAlert()
             return
         }
         settingsController?.window?.orderOut(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-            guard let self else { return }
-            let coordinator = CaptureCoordinator(initialLongMode: longMode)
-            self.captureCoordinator = coordinator
-            coordinator.onFinish = { [weak self] in self?.captureCoordinator = nil }
+        // Reserve the session BEFORE the menu-dismissal delay. Repeated hotkeys
+        // must never create orphan overlays with callbacks to a released coordinator.
+        let coordinator = CaptureCoordinator(initialLongMode: longMode)
+        captureCoordinator = coordinator
+        coordinator.onFinish = { [weak self, weak coordinator] in
+            guard let self, self.captureCoordinator === coordinator else { return }
+            self.captureCoordinator = nil
+        }
+        if preservingPopover {
+            LongCaptureDiagnostics.shared.log("shortcut.popover.capture")
+            coordinator.start(afterSnapshot: { [weak self] in self?.statusPopover.close() })
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self, weak coordinator] in
+            guard let self, let coordinator, self.captureCoordinator === coordinator else { return }
             coordinator.start()
         }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        captureCoordinator?.cancel()
+        return .terminateNow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        captureCoordinator?.cancel()
     }
 
     private func showPermissionAlert() {
@@ -1285,4 +1328,59 @@ enum L10n {
             "color.custom": "Color personalizado (RGB / HSL / rueda / cuentagotas)"
         ]
     ]
+}
+
+/// Menu actions presented without NSMenu's nested input-tracking loop.
+final class StatusPopoverContent: NSViewController {
+    let actionMenu: NSMenu
+    var onSelect: ((NSMenuItem) -> Void)?
+    var onCancel: (() -> Void)?
+
+    init(menu: NSMenu) {
+        self.actionMenu = menu
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func loadView() {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        for (index, item) in actionMenu.items.enumerated() {
+            if item.isSeparatorItem {
+                let line = NSBox()
+                line.boxType = .separator
+                stack.addArrangedSubview(line)
+                line.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -16).isActive = true
+            } else {
+                let button = NSButton(title: item.title, target: self, action: #selector(selectItem(_:)))
+                button.tag = index
+                button.bezelStyle = .recessed
+                button.alignment = .left
+                button.font = .menuFont(ofSize: 14)
+                button.keyEquivalent = item.keyEquivalent
+                button.keyEquivalentModifierMask = item.keyEquivalentModifierMask
+                button.isEnabled = item.isEnabled
+                stack.addArrangedSubview(button)
+                button.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -16).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            }
+        }
+        let width = max(240, actionMenu.items.map {
+            ($0.title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 14)]).width + 44
+        }.max() ?? 240)
+        stack.widthAnchor.constraint(equalToConstant: width).isActive = true
+        view = stack
+        preferredContentSize = stack.fittingSize
+    }
+
+    @objc private func selectItem(_ sender: NSButton) {
+        guard actionMenu.items.indices.contains(sender.tag) else { return }
+        onSelect?(actionMenu.items[sender.tag])
+    }
+
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
 }

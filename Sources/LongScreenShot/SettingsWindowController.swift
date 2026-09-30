@@ -822,10 +822,69 @@ final class UpdateChecker {
     }
 }
 
-final class HotKeyRecorderView: NSView {
-    var configuration: HotKeyConfiguration = .current { didSet { needsDisplay = true } }
-    private var recording = false
-    private var validationMessage: String?
+/// AppKit owns text layout and font fallback. Keep custom drawing limited to the
+/// border/background: measuring SF Mono shortcut glyphs during scrolling previously
+/// raised an Objective-C exception in CoreText's ApplyFont path on macOS 26.
+class ShortcutRecorderDisplayView: NSView {
+    let displayLabel = NSTextField(labelWithString: "")
+    var recording = false { didSet { refreshAppearance() } }
+    var validationMessage: String? { didSet { refreshAppearance() } }
+    var shortcutDisplayString: String { "" }
+    var shortcutFontSize: CGFloat { 14 }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureLabel()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureLabel()
+    }
+
+    private func configureLabel() {
+        displayLabel.translatesAutoresizingMaskIntoConstraints = false
+        displayLabel.alignment = .center
+        displayLabel.lineBreakMode = .byTruncatingTail
+        displayLabel.maximumNumberOfLines = 1
+        displayLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addSubview(displayLabel)
+        NSLayoutConstraint.activate([
+            displayLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
+            displayLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            displayLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        refreshAppearance()
+    }
+
+    func refreshAppearance() {
+        displayLabel.stringValue = validationMessage
+            ?? (recording ? L10n.tr("settings.recordHotKey") : shortcutDisplayString)
+        displayLabel.font = .systemFont(ofSize: validationMessage == nil ? shortcutFontSize : 11, weight: .medium)
+        displayLabel.textColor = validationMessage == nil ? .labelColor : .systemRed
+        needsDisplay = true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        // The label must not intercept clicks intended to start shortcut recording.
+        return hit === displayLabel ? self : hit
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
+        let hasError = validationMessage != nil
+        (recording ? NSColor.controlAccentColor.withAlphaComponent(0.18)
+            : (hasError ? NSColor.systemRed.withAlphaComponent(0.12) : NSColor.controlBackgroundColor)).setFill()
+        path.fill()
+        (hasError ? NSColor.systemRed : (recording ? NSColor.controlAccentColor : NSColor.separatorColor)).setStroke()
+        path.lineWidth = recording || hasError ? 2 : 1
+        path.stroke()
+    }
+}
+
+final class HotKeyRecorderView: ShortcutRecorderDisplayView {
+    var configuration: HotKeyConfiguration = .current { didSet { refreshAppearance() } }
 
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
@@ -870,29 +929,14 @@ final class HotKeyRecorderView: NSView {
         return true
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
-        let hasError = validationMessage != nil
-        (recording ? NSColor.controlAccentColor.withAlphaComponent(0.18) : (hasError ? NSColor.systemRed.withAlphaComponent(0.12) : NSColor.controlBackgroundColor)).setFill()
-        path.fill()
-        (hasError ? NSColor.systemRed : (recording ? NSColor.controlAccentColor : NSColor.separatorColor)).setStroke()
-        path.lineWidth = recording || hasError ? 2 : 1
-        path.stroke()
-        let text = validationMessage ?? (recording ? L10n.tr("settings.recordHotKey") : configuration.displayString)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: hasError ? 11 : 16, weight: .medium),
-            .foregroundColor: hasError ? NSColor.systemRed : NSColor.labelColor
-        ]
-        let size = text.size(withAttributes: attrs)
-        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
-    }
+    override var shortcutDisplayString: String { configuration.displayString }
+    override var shortcutFontSize: CGFloat { 16 }
+
 }
 
-final class ToolShortcutRecorderView: NSView {
+final class ToolShortcutRecorderView: ShortcutRecorderDisplayView {
     let command: CaptureCommand
-    private var configuration: HotKeyConfiguration
-    private var recording = false
-    private var validationMessage: String?
+    private var configuration: HotKeyConfiguration { didSet { refreshAppearance() } }
     private var observer: NSObjectProtocol?
 
     init(command: CaptureCommand) {
@@ -974,38 +1018,7 @@ final class ToolShortcutRecorderView: NSView {
         return true
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(
-            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
-            xRadius: 7,
-            yRadius: 7
-        )
-        let hasError = validationMessage != nil
-        let fill = recording
-            ? NSColor.controlAccentColor.withAlphaComponent(0.18)
-            : (hasError ? NSColor.systemRed.withAlphaComponent(0.12) : NSColor.controlBackgroundColor)
-        fill.setFill()
-        path.fill()
-        (hasError ? NSColor.systemRed : (recording ? NSColor.controlAccentColor : NSColor.separatorColor)).setStroke()
-        path.lineWidth = recording || hasError ? 2 : 1
-        path.stroke()
-
-        let text = validationMessage
-            ?? (recording ? L10n.tr("settings.recordHotKey") : configuration.displayString)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: validationMessage == nil ? 14 : 11, weight: .medium),
-            .foregroundColor: hasError ? NSColor.systemRed : NSColor.labelColor
-        ]
-        let size = text.size(withAttributes: attributes)
-        let point = NSPoint(
-            x: max(5, (bounds.width - min(size.width, bounds.width - 10)) / 2),
-            y: (bounds.height - size.height) / 2
-        )
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: bounds.insetBy(dx: 5, dy: 0)).addClip()
-        text.draw(at: point, withAttributes: attributes)
-        NSGraphicsContext.restoreGraphicsState()
-    }
+    override var shortcutDisplayString: String { configuration.displayString }
 }
 
 final class LinkButton: NSButton {

@@ -1,7 +1,16 @@
 import AppKit
 import Carbon
 
+enum CaptureWindowLevels {
+    // Cover captured menus without using the screen-saver/security window tier.
+    static let overlay = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+    static let color = NSWindow.Level(rawValue: overlay.rawValue + 1)
+    static let toolbar = NSWindow.Level(rawValue: overlay.rawValue + 2)
+}
+
 final class CaptureOverlayWindow: NSWindow {
+    var onCancel: (() -> Void)?
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
@@ -22,7 +31,16 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     private var longCaptureService: LongCaptureService?
     private var longCaptureToolbarController: LongCaptureToolbarController?
     private var manualLongCaptureFinishing = false
-    private var escapeHotKey: GlobalHotKey?
+    private var cursorPushed = false
+    private var closed = false
+    var allowsInactiveCapture: Bool { longCaptureService != nil }
+
+    func releaseInput() {
+        window?.ignoresMouseEvents = true
+        window?.orderOut(nil)
+        longCaptureToolbarController?.window?.ignoresMouseEvents = true
+        longCaptureToolbarController?.window?.orderOut(nil)
+    }
     private var focusedScreenObserver: NSObjectProtocol?
 
     init(snapshot: ScreenSnapshot, startsInLongMode: Bool) {
@@ -35,13 +53,15 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
             defer: false,
             screen: snapshot.screen
         )
-        window.level = .screenSaver
+        window.level = CaptureWindowLevels.overlay
+        window.hidesOnDeactivate = true
         window.backgroundColor = .clear
         window.isOpaque = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.setFrame(snapshot.screen.frame, display: false)
         window.acceptsMouseMovedEvents = true
         super.init(window: window)
+        window.onCancel = { [weak self] in self?.onCancel?() }
         let view = CaptureOverlayView(snapshot: snapshot)
         view.delegate = self
         view.startsInLongMode = startsInLongMode
@@ -67,33 +87,30 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func show() {
-        escapeHotKey = GlobalHotKey(
-            configuration: HotKeyConfiguration(keyCode: UInt32(kVK_Escape), carbonModifiers: 0)
-        ) { [weak self] in
-            guard let self else { return }
-            if self.longCaptureService != nil { self.cancelManualLongCapture() }
-            else { self.onCancel?() }
-        }
-        NSApp.activate(ignoringOtherApps: true)
+        guard !closed, NSApp.isActive else { return }
         window?.setFrame(snapshot.screen.frame, display: true)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(window?.contentView)
         (window?.contentView as? CaptureOverlayView)?.refreshHoverFromCurrentPointer()
-        NSCursor.crosshair.push()
+        if !cursorPushed { NSCursor.crosshair.push(); cursorPushed = true }
     }
 
     override func close() {
+        guard !closed else { return }
+        closed = true
+        // Remove the input-blocking windows before any cancellation/cache cleanup.
+        releaseInput()
+        (window as? CaptureOverlayWindow)?.onCancel = nil
         longCaptureService?.cancel()
         longCaptureService = nil
         (window?.contentView as? CaptureOverlayView)?.prepareForClose()
         longCaptureToolbarController?.close()
         longCaptureToolbarController = nil
-        escapeHotKey = nil
         if let focusedScreenObserver { NotificationCenter.default.removeObserver(focusedScreenObserver) }
         focusedScreenObserver = nil
         onCancel = nil
         onComplete = nil
-        NSCursor.pop()
+        if cursorPushed { NSCursor.pop(); cursorPushed = false }
         super.close()
     }
 
@@ -116,6 +133,7 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
         }
         window.displayIfNeeded()
         window.ignoresMouseEvents = true
+        window.hidesOnDeactivate = false
 
         let toolbarController = LongCaptureToolbarController(
             screen: snapshot.screen,
@@ -191,11 +209,7 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     }
 
     private func cancelManualLongCapture() {
-        longCaptureService?.cancel()
-        longCaptureService = nil
-        longCaptureToolbarController?.close()
-        longCaptureToolbarController = nil
-        window?.ignoresMouseEvents = false
+        // The coordinator releases all displays before cancelling capture resources.
         onCancel?()
     }
 
@@ -404,6 +418,10 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
             return
         }
         super.keyDown(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        delegate?.overlayDidCancel(self)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -2259,7 +2277,7 @@ private final class CaptureColorWell: NSColorWell {
         panel.isContinuous = true
         HSLColorAccessoryView.shared.attach(to: panel, color: color)
         panel.accessoryView = HSLColorAccessoryView.shared
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        panel.level = CaptureWindowLevels.color
         super.activate(exclusive)
         panel.orderFrontRegardless()
     }
@@ -2416,7 +2434,7 @@ final class LongCaptureToolbarController: NSWindowController {
             screen: screen
         )
         panel.setFrame(globalFrame, display: false)
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+        panel.level = CaptureWindowLevels.toolbar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isOpaque = false
         panel.backgroundColor = .clear

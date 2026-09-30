@@ -193,7 +193,7 @@ final class GlobalHotKey {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let pointer = Unmanaged.passUnretained(self).toOpaque()
         let status = InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
-            guard let event, let userData else { return noErr }
+            guard let event, let userData else { return OSStatus(eventNotHandledErr) }
             let owner = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
             var incoming = EventHotKeyID()
             var actualSize = 0
@@ -205,8 +205,13 @@ final class GlobalHotKey {
                 MemoryLayout<EventHotKeyID>.size,
                 &actualSize,
                 &incoming
-            ) == noErr, incoming.id == owner.identifier else { return noErr }
-            DispatchQueue.main.async { owner.action() }
+            ) == noErr, incoming.signature == OSType(0x4C535348),
+               incoming.id == owner.identifier else { return OSStatus(eventNotHandledErr) }
+            // Menu tracking uses a different run-loop mode. Do not leave Escape
+            // waiting on the default queue, and do not retain a cancelled binding.
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) { [weak owner] in
+                owner?.action()
+            }
             return noErr
         }, 1, &eventType, pointer, &eventHandler)
         guard status == noErr else { return nil }
