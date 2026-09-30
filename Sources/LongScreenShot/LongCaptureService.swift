@@ -1198,6 +1198,7 @@ final class VisualScrollTracker {
     private var anchor: FrameMatcher.FrameSignature
     private var anchorSamples: Samples
     private(set) var top = 0
+    private(set) var lastMatchDiagnostic = "initial"
 
     init(first: FrameMatcher.FrameSignature) {
         anchor = first
@@ -1207,10 +1208,10 @@ final class VisualScrollTracker {
     func observe(_ next: FrameMatcher.FrameSignature) -> Update {
         guard anchor.originalHeight == next.originalHeight,
               anchor.precise.width == next.precise.width else { return .unmatched }
-        if FrameMatcher.averageDifference(anchor, next) < 0.20 { return .unchanged }
+        if anchor.precise.pixels == next.precise.pixels { return .unchanged }
         let nextSamples = Samples(next.precise)
         guard let movement = Self.translation(previous: anchor.precise, next: next.precise,
-                                               a: anchorSamples, b: nextSamples),
+                                               a: anchorSamples, b: nextSamples, diagnostic: &lastMatchDiagnostic),
               top + movement >= 0 else { return .unmatched }
         if movement == 0 { return .unchanged }
         top += movement
@@ -1219,34 +1220,68 @@ final class VisualScrollTracker {
         return .matched(top: top, movement: movement)
     }
 
-    /// Horizontal samples retain EVERY source row. Prefix sums make the NCC
-    /// normalization O(1) for each displacement; Accelerate computes the dot product
-    /// in optimized native code even when this application is built with Swift -Onone.
+    /// Keep every row, grouped by sampling phase. Search still evaluates EVERY
+    /// integer displacement, using bounded row samples; final verification checks
+    /// all overlapping rows independently. Tall Retina frames no longer make the
+    /// exhaustive search quadratic in height.
     private struct Samples {
         let width: Int
         let pixels: [Float]
         let sums: [Double]
         let squares: [Double]
+        let rowStep: Int
+        let phaseOffsets: [Int]
+        let gradients: [Float]
 
-        init(_ frame: FrameMatcher.GrayFrame) {
+        func sampledRowIndex(_ row: Int) -> Int {
+            phaseOffsets[row % rowStep] + row / rowStep
+        }
+
+        init(_ frame: FrameMatcher.GrayFrame, columns requestedColumns: [Int]? = nil,
+             preparedGradients: [Float]? = nil) {
             let inset = max(1, frame.width / 12)
-            let columns = Array(stride(from: inset, to: frame.width - inset, by: 4))
+            let columns = requestedColumns ?? Array(stride(from: inset, to: frame.width - inset, by: 4))
+            if let preparedGradients {
+                gradients = preparedGradients
+            } else {
+                var floats = [Float](repeating: 0, count: frame.pixels.count)
+                vDSP_vfltu8(frame.pixels, 1, &floats, 1, vDSP_Length(floats.count))
+                var differences = [Float](repeating: 0, count: floats.count)
+                if frame.height > 1 {
+                    floats.withUnsafeBufferPointer { buffer in
+                        differences.withUnsafeMutableBufferPointer { output in
+                            vDSP_vsub(buffer.baseAddress!, 1, buffer.baseAddress! + frame.width, 1,
+                                      output.baseAddress! + frame.width, 1,
+                                      vDSP_Length(floats.count - frame.width))
+                        }
+                    }
+                }
+                gradients = differences
+            }
             width = columns.count
             var values = [Float]()
             values.reserveCapacity(width * frame.height)
+            rowStep = max(1, frame.height / 480)
+            var offsets: [Int] = []
             var rowSums = [Double](repeating: 0, count: frame.height + 1)
             var rowSquares = rowSums
-            for row in 0..<frame.height {
-                var sum = 0.0, square = 0.0
-                for x in columns {
-                    let value = Double(frame.pixels[row * frame.width + x])
-                    values.append(Float(value))
-                    sum += value
-                    square += value * value
+            var outputRow = 0
+            for phase in 0..<rowStep {
+                offsets.append(outputRow)
+                for row in stride(from: phase, to: frame.height, by: rowStep) {
+                    var sum = 0.0, square = 0.0
+                    for x in columns {
+                        let value = Double(gradients[row * frame.width + x])
+                        values.append(Float(value))
+                        sum += value
+                        square += value * value
+                    }
+                    rowSums[outputRow + 1] = rowSums[outputRow] + sum
+                    rowSquares[outputRow + 1] = rowSquares[outputRow] + square
+                    outputRow += 1
                 }
-                rowSums[row + 1] = rowSums[row] + sum
-                rowSquares[row + 1] = rowSquares[row] + square
             }
+            phaseOffsets = offsets
             pixels = values
             sums = rowSums
             squares = rowSquares
@@ -1256,12 +1291,42 @@ final class VisualScrollTracker {
     static func translation(previous a: FrameMatcher.GrayFrame,
                             next b: FrameMatcher.GrayFrame) -> Int? {
         guard a.width == b.width, a.height == b.height, a.height >= 32 else { return nil }
-        return translation(previous: a, next: b, a: Samples(a), b: Samples(b))
+        var diagnostic = ""
+        return translation(previous: a, next: b, a: Samples(a), b: Samples(b), diagnostic: &diagnostic)
     }
 
     private static func translation(previous a: FrameMatcher.GrayFrame,
                                     next b: FrameMatcher.GrayFrame,
-                                    a samplesA: Samples, b samplesB: Samples) -> Int? {
+                                    a originalA: Samples, b originalB: Samples,
+                                    diagnostic: inout String) -> Int? {
+        // Blank margins and stationary sidebars are not evidence of displacement.
+        // Compare vertical edges, not absolute brightness across the whole width.
+        let horizontalInset = max(1, a.width / 12)
+        let verticalInset = max(2, a.height / 12)
+        let active = informativeColumns(a: originalA.gradients, b: originalB.gradients,
+                                        width: a.width, height: a.height, inset: verticalInset)
+        let activeColumns = (horizontalInset..<(a.width - horizontalInset)).filter { active[$0] }
+        let searchColumns = Array(stride(from: horizontalInset, to: a.width - horizontalInset, by: 4))
+        // Spend the sample budget on the article, rather than leaving most columns
+        // on its blank margins. Reserve separate columns for final verification.
+        let searchCount = min(15, activeColumns.count / 2)
+        let columns = searchCount > 0 ? (0..<searchCount).map {
+            activeColumns[$0 * activeColumns.count / searchCount]
+        } : []
+        let remaining = activeColumns.filter { !columns.contains($0) }
+        let verifyCount = min(15, remaining.count)
+        let verificationColumns = verifyCount > 0 ? (0..<verifyCount).map {
+            remaining[$0 * remaining.count / verifyCount]
+        } : []
+        diagnostic = "movingColumns=\(columns.count) verifyColumns=\(verificationColumns.count)"
+        guard columns.count >= 2, verificationColumns.count >= 2 else {
+            diagnostic += " reason=insufficientVerticalDetail"
+            return nil
+        }
+        let samplesA = columns == searchColumns ? originalA
+            : Samples(a, columns: columns, preparedGradients: originalA.gradients)
+        let samplesB = columns == searchColumns ? originalB
+            : Samples(b, columns: columns, preparedGradients: originalB.gradients)
         let limit = Int(Double(a.height) * 0.82)
         let inset = max(2, a.height / 12)
         var scores: [(shift: Int, score: Double)] = []
@@ -1275,44 +1340,85 @@ final class VisualScrollTracker {
                     let bStart = inset + max(0, -shift)
                     let rows = a.height - 2 * inset - abs(shift)
                     guard rows >= max(24, a.height / 20) else { continue }
-                    let count = rows * samplesA.width
+                    let sampledRows = (rows - 1) / samplesA.rowStep + 1
+                    let ai = samplesA.sampledRowIndex(aStart)
+                    let bi = samplesB.sampledRowIndex(bStart)
+                    let count = sampledRows * samplesA.width
                     let n = Double(count)
-                    let sa = samplesA.sums[aStart + rows] - samplesA.sums[aStart]
-                    let sb = samplesB.sums[bStart + rows] - samplesB.sums[bStart]
-                    let saa = samplesA.squares[aStart + rows] - samplesA.squares[aStart]
-                    let sbb = samplesB.squares[bStart + rows] - samplesB.squares[bStart]
+                    let sa = samplesA.sums[ai + sampledRows] - samplesA.sums[ai]
+                    let sb = samplesB.sums[bi + sampledRows] - samplesB.sums[bi]
+                    let saa = samplesA.squares[ai + sampledRows] - samplesA.squares[ai]
+                    let sbb = samplesB.squares[bi + sampledRows] - samplesB.squares[bi]
                     let va = n * saa - sa * sa, vb = n * sbb - sb * sb
                     guard n >= 32, va > n * n * 16, vb > n * n * 16 else { continue }
                     var dot: Float = 0
-                    vDSP_dotpr(ap + aStart * samplesA.width, 1,
-                                bp + bStart * samplesB.width, 1, &dot, vDSP_Length(count))
+                    vDSP_dotpr(ap + ai * samplesA.width, 1,
+                                bp + bi * samplesB.width, 1, &dot, vDSP_Length(count))
                     let score = max(0, 1 - (n * Double(dot) - sa * sb) / sqrt(va * vb)) * 100
                     scores.append((shift, score))
                 }
             }
         }
-        guard let best = scores.min(by: { $0.score < $1.score }), best.score < 4 else { return nil }
+        guard let best = scores.min(by: { $0.score < $1.score }) else {
+            diagnostic += " reason=lowVariance"; return nil
+        }
+        diagnostic += " bestShift=\(best.shift) score=\(String(format: "%.3f", best.score))"
+        guard best.score < 4 else { diagnostic += " reason=poorCorrelation"; return nil }
         // Separate repeating rows/cards are ambiguous even when one match is exact.
         let alternative = scores.filter { abs($0.shift - best.shift) > 3 }
             .map(\.score).min() ?? 100
-        guard alternative - best.score >= 1.0 else { return nil }
+        diagnostic += " margin=\(String(format: "%.3f", alternative - best.score))"
+        guard alternative - best.score >= 1.0 else { diagnostic += " reason=ambiguous"; return nil }
         // Verify all rows at a second set of columns, not only search samples.
         let aStart = max(0, best.shift), bStart = max(0, -best.shift)
         let lower = max(0, inset - min(aStart, bStart))
         let upper = a.height - inset - max(aStart, bStart)
-        var error = 0.0, count = 0
-        for row in max(1, lower)..<upper {
-            for x in stride(from: max(1, a.width / 12) + 1,
-                            to: a.width - max(1, a.width / 12), by: 5) {
-                let ai = (aStart + row) * a.width + x
-                let bi = (bStart + row) * b.width + x
-                let ga = Int(a.pixels[ai]) - Int(a.pixels[ai - a.width])
-                let gb = Int(b.pixels[bi]) - Int(b.pixels[bi - b.width])
-                error += Double(abs(ga - gb)); count += 1
+        let firstRow = max(1, lower)
+        let rowCount = upper - firstRow
+        guard rowCount > 0 else { return nil }
+        var differences = [Float](repeating: 0, count: rowCount)
+        var error: Float = 0
+        var count = 0
+        samplesA.gradients.withUnsafeBufferPointer { ga in
+            samplesB.gradients.withUnsafeBufferPointer { gb in
+                for x in verificationColumns {
+                    vDSP_vsub(ga.baseAddress! + (aStart + firstRow) * a.width + x, vDSP_Stride(a.width),
+                              gb.baseAddress! + (bStart + firstRow) * b.width + x, vDSP_Stride(b.width),
+                              &differences, 1, vDSP_Length(rowCount))
+                    var sum: Float = 0
+                    vDSP_svemg(differences, 1, &sum, vDSP_Length(rowCount))
+                    error += sum
+                    count += rowCount
+                }
             }
         }
-        guard count > 0, error / Double(count) < 8 else { return nil }
+        diagnostic += " edgeError=\(String(format: "%.3f", error / Float(max(1, count))))"
+        guard count > 0, error / Float(count) < 8 else { diagnostic += " reason=edgeMismatch"; return nil }
         return best.shift
+    }
+
+    private static func informativeColumns(a: [Float], b: [Float], width: Int, height: Int,
+                                           inset: Int) -> [Bool] {
+        let rows = height - 2 * inset
+        guard rows > 0 else { return Array(repeating: false, count: width) }
+        var result = Array(repeating: false, count: width)
+        var delta = [Float](repeating: 0, count: rows)
+        a.withUnsafeBufferPointer { ap in
+            b.withUnsafeBufferPointer { bp in
+                for x in 0..<width {
+                    let pa = ap.baseAddress! + inset * width + x
+                    let pb = bp.baseAddress! + inset * width + x
+                    var energyA: Float = 0, energyB: Float = 0, change: Float = 0
+                    vDSP_svemg(pa, vDSP_Stride(width), &energyA, vDSP_Length(rows))
+                    vDSP_svemg(pb, vDSP_Stride(width), &energyB, vDSP_Length(rows))
+                    vDSP_vsub(pa, vDSP_Stride(width), pb, vDSP_Stride(width), &delta, 1, vDSP_Length(rows))
+                    vDSP_svemg(delta, 1, &change, vDSP_Length(rows))
+                    result[x] = min(energyA, energyB) / Float(rows) > 0.35
+                        && change / Float(rows) > 0.15
+                }
+            }
+        }
+        return result
     }
 }
 
@@ -1634,6 +1740,9 @@ final class LongCaptureService {
         case .unmatched:
             overlapLost = true
             rejectedValidationCount += 1
+            if rejectedValidationCount <= 5 || rejectedValidationCount % 60 == 0 {
+                LongCaptureDiagnostics.shared.log("visual.match.rejected seq=\(frame.sequence) top=\(tracker.top) \(tracker.lastMatchDiagnostic)")
+            }
             dispatchStatus("重叠不足或内容不明确，请向上滚回已采集位置后继续", isError: false)
             return
         case let .matched(top, movement):
@@ -1782,22 +1891,34 @@ enum FrameMatcher {
             224,
             max(128, Int(ceil(CGFloat(image.width) / CGFloat(max(1, image.height)) * 145)))
         )
-        // CGContext grayscale drawing converts/resamples the large source twice;
-        // on a Retina capture this dominated Debug processing time. Convert once
-        // with vImage, then derive both signatures using native vector kernels.
-        let space = CGColorSpaceCreateDeviceRGB()
-        var format = vImage_CGImageFormat(bitsPerComponent: 8, bitsPerPixel: 32,
-            colorSpace: Unmanaged.passUnretained(space),
-            bitmapInfo: CGBitmapInfo.byteOrder32Little.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)),
-            version: 0, decode: nil, renderingIntent: .defaultIntent)
-        var rgba = vImage_Buffer()
-        guard vImageBuffer_InitWithCGImage(&rgba, &format, nil, image, vImage_Flags(kvImageNoFlags)) == kvImageNoError else { return nil }
-        defer { free(rgba.data) }
-        var pixels = [UInt8](repeating: 0, count: image.width * image.height)
-        let matrix: [Int16] = [29, 150, 77, 0] // BGRA -> luminance; alpha is ignored.
+        // Build a narrow matching image BEFORE luminance conversion. The output
+        // screenshot keeps all original pixels; only the tracking data is reduced.
+        // Nearest-neighbour sampling retains every source row and avoids converting
+        // tens of MB per frame when the selection spans a Retina display.
+        let sampledWidth = min(144, image.width)
+        let nativeRGB = image.bitsPerComponent == 8 && image.bitsPerPixel == 32
+            && image.colorSpace?.model == .rgb
+            && [.premultipliedFirst, .premultipliedLast, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo)
+        let info = nativeRGB ? image.bitmapInfo : CGBitmapInfo.byteOrder32Little.union(CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue))
+        let space = nativeRGB ? image.colorSpace! : CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(data: nil, width: sampledWidth, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: sampledWidth * 4,
+            space: space, bitmapInfo: info.rawValue),
+              let data = context.data else { return nil }
+        context.interpolationQuality = .none
+        context.setBlendMode(.copy)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: sampledWidth, height: image.height))
+        var rgba = vImage_Buffer(data: data, height: vImagePixelCount(image.height),
+                                width: vImagePixelCount(sampledWidth), rowBytes: context.bytesPerRow)
+        var pixels = [UInt8](repeating: 0, count: sampledWidth * image.height)
+        let littleEndian = info.contains(.byteOrder32Little)
+        let alphaFirst = context.alphaInfo == .premultipliedFirst || context.alphaInfo == .noneSkipFirst
+        let matrix: [Int16] = alphaFirst
+            ? (littleEndian ? [29, 150, 77, 0] : [0, 77, 150, 29])
+            : (littleEndian ? [0, 29, 150, 77] : [77, 150, 29, 0])
         return pixels.withUnsafeMutableBytes { bytes in
             var planar = vImage_Buffer(data: bytes.baseAddress, height: vImagePixelCount(image.height),
-                                       width: vImagePixelCount(image.width), rowBytes: image.width)
+                                       width: vImagePixelCount(sampledWidth), rowBytes: sampledWidth)
             guard vImageMatrixMultiply_ARGB8888ToPlanar8(&rgba, &planar, matrix, 256, nil, 0,
                                                         vImage_Flags(kvImageNoFlags)) == kvImageNoError else { return nil }
             let coarseWidth = min(aspectAwareWidth, image.width)

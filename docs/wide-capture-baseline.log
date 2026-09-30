@@ -1,0 +1,27 @@
+Building for debugging...
+[0/5] Write sources
+[1/5] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Emitting module LongScreenShotTests
+[4/5] Compiling LongScreenShotTests FrameStitcherTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking LongScreenShotPackageTests
+Build complete! (1.20s)
+Test Suite 'Selected tests' started at 2026-09-30 21:17:47.450.
+Test Suite 'LongScreenShotPackageTests.xctest' started at 2026-09-30 21:17:47.450.
+Test Suite 'FrameStitcherTests' started at 2026-09-30 21:17:47.450.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug]' started.
+/Users/mustangym/Documents/ChatGPT/LongScreenShot/Tests/LongScreenShotTests/FrameStitcherTests.swift:471: error: -[LongScreenShotTests.FrameStitcherTests testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug] : XCTAssertLessThan failed: ("38.98106874742856") is not less than ("16.666666666666668") - Processing must sustain the configured frame rate, including Debug builds
+/Users/mustangym/Documents/ChatGPT/LongScreenShot/Tests/LongScreenShotTests/FrameStitcherTests.swift:472: error: -[LongScreenShotTests.FrameStitcherTests testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug] : XCTAssertLessThan failed: ("6800640000.0") is not less than ("201326592.0") - Must not trip the ingress limit at startup
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug]' failed (4.831 seconds).
+Test Suite 'FrameStitcherTests' failed at 2026-09-30 21:17:52.281.
+	 Executed 1 test, with 2 failures (0 unexpected) in 4.831 (4.831) seconds
+Test Suite 'LongScreenShotPackageTests.xctest' failed at 2026-09-30 21:17:52.282.
+	 Executed 1 test, with 2 failures (0 unexpected) in 4.831 (4.831) seconds
+Test Suite 'Selected tests' failed at 2026-09-30 21:17:52.282.
+	 Executed 1 test, with 2 failures (0 unexpected) in 4.831 (4.832) seconds
+RetinaProfile copyMS=443.0702105164528 signatureMS=2882.0030414499342 trackingMS=1280.2818352356553
+RetinaPipeline frames=120 meanMS=38.98106874742856 peakBacklogMS=2677.728249691428 queuedMiB=6485.595703125
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

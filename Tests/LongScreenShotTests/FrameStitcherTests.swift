@@ -409,11 +409,139 @@ final class FrameStitcherTests: XCTestCase {
         XCTAssertEqual(tracker.observe(try XCTUnwrap(FrameMatcher.signature(next))), .matched(top: 455, movement: 455))
     }
 
+    func testTallWideTrackingKeepsSinglePixelPrecisionAcrossSamplingPhases() throws {
+        let source = try makeFineRowPattern(width: 4400, height: 4200)
+        func signature(_ top: Int) throws -> FrameMatcher.FrameSignature {
+            let frame = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: top, width: 4400, height: 2400)))
+            return try XCTUnwrap(FrameMatcher.signature(frame))
+        }
+        let tracker = VisualScrollTracker(first: try signature(0))
+        var previous = 0
+        for top in [1, 2, 3, 4, 5, 17, 643, 642, 1443] {
+            XCTAssertEqual(tracker.observe(try signature(top)), .matched(top: top, movement: top - previous))
+            previous = top
+        }
+    }
+
+    func testTallTrackingRejectsRepeatedRowsAfterRowSampling() throws {
+        let source = try makeTextLikePattern(width: 600, height: 2800)
+        let first = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0, width: 600, height: 2400)))
+        let next = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 101, width: 600, height: 2400)))
+        let tracker = VisualScrollTracker(first: try XCTUnwrap(FrameMatcher.signature(first)))
+        XCTAssertEqual(tracker.observe(try XCTUnwrap(FrameMatcher.signature(next))), .unmatched)
+        XCTAssertEqual(tracker.top, 0)
+    }
+
+    func testSignatureMatchesAcrossCapturePixelFormats() throws {
+        let source = try makeFineRowPattern(width: 600, height: 800)
+        let baseline = try XCTUnwrap(FrameMatcher.signature(source))
+        for info in [
+            CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue,
+            CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue,
+            CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        ] {
+            let context = try XCTUnwrap(CGContext(data: nil, width: 600, height: 800,
+                bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info))
+            context.draw(source, in: CGRect(x: 0, y: 0, width: 600, height: 800))
+            let converted = try XCTUnwrap(context.makeImage())
+            let signature = try XCTUnwrap(FrameMatcher.signature(converted))
+            XCTAssertEqual(signature.precise.pixels, baseline.precise.pixels)
+            XCTAssertEqual(signature.coarse.pixels, baseline.coarse.pixels)
+        }
+    }
+
+    func testWideBackgroundDoesNotHideNarrowScrollingContent() {
+        let a = wideContentFrame(top: 0, fixedSidebar: false)
+        let b = wideContentFrame(top: 67, fixedSidebar: false)
+        XCTAssertEqual(VisualScrollTracker.translation(previous: a, next: b), 67)
+    }
+
+    func testFixedSidebarDoesNotOverrideScrollingBody() {
+        let a = wideContentFrame(top: 0, fixedSidebar: true)
+        let b = wideContentFrame(top: 67, fixedSidebar: true)
+        XCTAssertEqual(VisualScrollTracker.translation(previous: a, next: b), 67)
+    }
+
+    func testBrowserTextWithWideWhiteMarginsStitchesWithoutGaps() throws {
+        let width = 2782, viewport = 1544, documentHeight = 6200
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: documentHeight,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: documentHeight))
+        // A narrow article with distinct word lengths, line spacing and large white margins.
+        for line in 0..<120 {
+            var x = 910
+            for word in 0..<(4 + line % 5) {
+                let length = 24 + ((line * 37 + word * 19) % 88)
+                context.setFillColor(gray: 0.18 + Double((line + word) % 3) * 0.08, alpha: 1)
+                context.fill(CGRect(x: x, y: 24 + line * 50, width: length, height: 16 + line % 3))
+                x += length + 14
+            }
+        }
+        let source = try XCTUnwrap(context.makeImage())
+        func frame(_ top: Int) throws -> CGImage {
+            try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: top, width: width, height: viewport)))
+        }
+        let first = try frame(0)
+        let tracker = VisualScrollTracker(first: try XCTUnwrap(FrameMatcher.signature(first)))
+        let canvas = LongCaptureCanvasAccumulator(firstFrame: first, maximumHeight: 180000)
+        for top in stride(from: 37, through: 3700, by: 37) {
+            let image = try frame(top)
+            let signature = try XCTUnwrap(FrameMatcher.signature(image))
+            XCTAssertEqual(tracker.observe(signature), .matched(top: top, movement: 37), tracker.lastMatchDiagnostic)
+            _ = canvas.place(image, topOffset: tracker.top, signature: signature, visuallyVerified: true)
+        }
+        let actual = try XCTUnwrap(canvas.snapshot().makeImage())
+        let expected = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0, width: width, height: viewport + 3700)))
+        XCTAssertEqual(actual.height, expected.height)
+        XCTAssertLessThan(FrameMatcher.averageDifference(actual, expected), 0.01)
+    }
+
+    func testWideWhiteMarginsDoNotMakeRepeatedTextUnambiguous() {
+        func frame(_ top: Int) -> FrameMatcher.GrayFrame {
+            var pixels = [UInt8](repeating: 255, count: 72 * 600)
+            for y in 0..<600 {
+                for x in 26..<46 where (y + top) % 24 < 8 {
+                    pixels[y * 72 + x] = 40
+                }
+            }
+            return FrameMatcher.GrayFrame(width: 72, height: 600, pixels: pixels)
+        }
+        XCTAssertNil(VisualScrollTracker.translation(previous: frame(0), next: frame(7)))
+    }
+
+    private func wideContentFrame(top: Int, fixedSidebar: Bool) -> FrameMatcher.GrayFrame {
+        let width = 72, height = 600
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                var value = x < 30 ? 32 : 240
+                if (30..<44).contains(x) {
+                    let row = y + top
+                    let hash = (UInt64(row + 1) &* 0x9E3779B97F4A7C15) ^ UInt64(x * 7919)
+                    value = 225 + Int((hash ^ (hash >> 27)) % 23)
+                } else if fixedSidebar && x < 30 {
+                    value = 30 + ((y * 41 + y * y * 7 + x * 13) % 180)
+                }
+                pixels[y * width + x] = UInt8(value)
+            }
+        }
+        return FrameMatcher.GrayFrame(width: width, height: height, pixels: pixels)
+    }
+
     // Replays the user's 1948x1458 Retina selection. Run this in Debug too:
     // Release-only tests hid the scalar NCC bottleneck that filled the ingress queue.
     func testRetinaCapturePipelineKeepsUpWith60FPSInDebug() throws {
-        let width = 1948, height = 1458
-        let source = try makeFineRowPattern(width: width, height: 4400)
+        try checkRetinaPipeline(width: 1948, height: 1458)
+    }
+
+    func testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug() throws {
+        try checkRetinaPipeline(width: 4400, height: 2400)
+    }
+
+    private func checkRetinaPipeline(width: Int, height: Int) throws {
+        let source = try makeFineRowPattern(width: width, height: height + 3000)
         func frame(_ top: Int) throws -> CGImage {
             try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: top, width: width, height: height)))
         }

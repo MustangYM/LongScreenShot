@@ -1,0 +1,128 @@
+Building for debugging...
+[0/5] Write sources
+[1/5] Write swift-version--58304C5D6DBC2206.txt
+[3/7] Compiling LongScreenShot LongCaptureService.swift
+[4/7] Emitting module LongScreenShot
+[4/9] Write Objects.LinkFileList
+[5/9] Linking LongScreenShot
+[6/9] Applying LongScreenShot
+[8/10] Emitting module LongScreenShotTests
+[8/10] Write Objects.LinkFileList
+[9/10] Linking LongScreenShotPackageTests
+Build complete! (3.42s)
+Test Suite 'All tests' started at 2026-09-30 21:40:11.377.
+Test Suite 'LongScreenShotPackageTests.xctest' started at 2026-09-30 21:40:11.378.
+Test Suite 'CaptureLifecycleTests' started at 2026-09-30 21:40:11.378.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testActivationTimeoutCannotBeUndoneByLateActivation]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testActivationTimeoutCannotBeUndoneByLateActivation]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testCancelBeforeDelayedStartDoesNotCaptureOrReopen]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testCancelBeforeDelayedStartDoesNotCaptureOrReopen]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testCancelledPendingCaptureDoesNotDismissAnOpenMenu]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testCancelledPendingCaptureDoesNotDismissAnOpenMenu]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testFailedCaptureFinishesOnceWithoutInstallingOverlays]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testFailedCaptureFinishesOnceWithoutInstallingOverlays]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testForeignMenuCannotPresentOverlayBeforeActivation]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testForeignMenuCannotPresentOverlayBeforeActivation]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testOverlayLevelsDoNotUseScreenSaverTier]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testOverlayLevelsDoNotUseScreenSaverTier]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testOwnMenuIsDismissedOnlyAfterItsPixelsAreCaptured]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testOwnMenuIsDismissedOnlyAfterItsPixelsAreCaptured]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testRepeatedStartAndRepeatedCancelAreIdempotent]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testRepeatedStartAndRepeatedCancelAreIdempotent]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testStatusMenuTrackingPreventsPresentationEvenWhenAppIsActive]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testStatusMenuTrackingPreventsPresentationEvenWhenAppIsActive]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testVisibleTrackingMenusAreDetectedWithoutTreatingMenuBarAsMenu]' started.
+Test Case '-[LongScreenShotTests.CaptureLifecycleTests testVisibleTrackingMenusAreDetectedWithoutTreatingMenuBarAsMenu]' passed (0.000 seconds).
+Test Suite 'CaptureLifecycleTests' passed at 2026-09-30 21:40:11.380.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+Test Suite 'FrameStitcherTests' started at 2026-09-30 21:40:11.380.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRecoversWhenScrollDeltaOverestimatesPageMovement]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRecoversWhenScrollDeltaOverestimatesPageMovement]' passed (0.003 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRetainsSinglePixelVerticalPrecision]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testAlignmentRetainsSinglePixelVerticalPrecision]' passed (0.005 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBothMosaicStylesChangePixels]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBothMosaicStylesChangePixels]' passed (0.037 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBottomBounceProducesAlmostNoNewContent]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBottomBounceProducesAlmostNoNewContent]' passed (0.011 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBrowserTextWithWideWhiteMarginsStitchesWithoutGaps]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testBrowserTextWithWideWhiteMarginsStitchesWithoutGaps]' passed (0.879 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testChunkedOverviewShowsTheWholeDocumentWithoutCumulativeBlur]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testChunkedOverviewShowsTheWholeDocumentWithoutCumulativeBlur]' passed (0.006 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testDuplicateDetection]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testDuplicateDetection]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFastScrollSequenceKeepsContinuousOverlap]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFastScrollSequenceKeepsContinuousOverlap]' passed (0.013 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFixedSidebarDoesNotOverrideScrollingBody]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFixedSidebarDoesNotOverrideScrollingBody]' passed (0.012 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testFullScreenWidthRetinaPipelineKeepsUpWith60FPSInDebug]' passed (1.762 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testHighVisualScoreCanRecoverWhenItAgreesWithMeasuredScroll]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testHighVisualScoreCanRecoverWhenItAgreesWithMeasuredScroll]' passed (0.000 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalPreviewCanvasStaysBoundedAndKeepsGrowing]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalPreviewCanvasStaysBoundedAndKeepsGrowing]' passed (0.005 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalSegmentsComposeWithoutKeepingFullFrames]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testIncrementalSegmentsComposeWithoutKeepingFullFrames]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testNCCAlignmentSurvivesUniformBrightnessChange]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testNCCAlignmentSurvivesUniformBrightnessChange]' passed (0.002 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testOverlapAndStitchedDimensions]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testOverlapAndStitchedDimensions]' passed (0.005 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewCanvasHasBoundedBackingSize]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewCanvasHasBoundedBackingSize]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewIsDownsampledInsteadOfFullResolution]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewIsDownsampledInsteadOfFullResolution]' passed (0.002 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewTilesReplaceTailWithoutGapsOrVerticalFlip]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testPreviewTilesReplaceTailWithoutGapsOrVerticalFlip]' passed (0.004 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testRetinaCapturePipelineKeepsUpWith60FPSInDebug]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testRetinaCapturePipelineKeepsUpWith60FPSInDebug]' passed (0.789 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testSeamBacktrackAndTailReplacementPreserveExactContent]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testSeamBacktrackAndTailReplacementPreserveExactContent]' passed (0.002 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testSignatureMatchesAcrossCapturePixelFormats]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testSignatureMatchesAcrossCapturePixelFormats]' passed (0.008 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testTallTrackingRejectsRepeatedRowsAfterRowSampling]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testTallTrackingRejectsRepeatedRowsAfterRowSampling]' passed (0.016 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testTallWideTrackingKeepsSinglePixelPrecisionAcrossSamplingPhases]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testTallWideTrackingKeepsSinglePixelPrecisionAcrossSamplingPhases]' passed (0.101 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVeryWideFastScrollKeepsSourceRowPrecision]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVeryWideFastScrollKeepsSourceRowPrecision]' passed (0.015 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingFastScrollPauseReverseAndSmallFinalTail]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingFastScrollPauseReverseAndSmallFinalTail]' passed (0.045 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRefusesAmbiguousRepeatedRows]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRefusesAmbiguousRepeatedRows]' passed (0.004 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRejectsMissingOverlapAndRecoversOnReturn]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingRejectsMissingOverlapAndRecoversOnReturn]' passed (0.014 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingWideViewportPreservesSingleRows]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testVisualTrackingWideViewportPreservesSingleRows]' passed (0.009 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testWideBackgroundDoesNotHideNarrowScrollingContent]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testWideBackgroundDoesNotHideNarrowScrollingContent]' passed (0.013 seconds).
+Test Case '-[LongScreenShotTests.FrameStitcherTests testWideWhiteMarginsDoNotMakeRepeatedTextUnambiguous]' started.
+Test Case '-[LongScreenShotTests.FrameStitcherTests testWideWhiteMarginsDoNotMakeRepeatedTextUnambiguous]' passed (0.006 seconds).
+Test Suite 'FrameStitcherTests' passed at 2026-09-30 21:40:15.154.
+	 Executed 30 tests, with 0 failures (0 unexpected) in 3.771 (3.774) seconds
+Test Suite 'ShortcutRecorderRenderingTests' started at 2026-09-30 21:40:15.154.
+Test Case '-[LongScreenShotTests.ShortcutRecorderRenderingTests testAllShortcutRowsRenderWhileScrollingInBothAppearances]' started.
+Test Case '-[LongScreenShotTests.ShortcutRecorderRenderingTests testAllShortcutRowsRenderWhileScrollingInBothAppearances]' passed (0.363 seconds).
+Test Case '-[LongScreenShotTests.ShortcutRecorderRenderingTests testGlobalShortcutChangesRefreshLabelAndLabelDoesNotInterceptClicks]' started.
+Test Case '-[LongScreenShotTests.ShortcutRecorderRenderingTests testGlobalShortcutChangesRefreshLabelAndLabelDoesNotInterceptClicks]' passed (0.001 seconds).
+Test Case '-[LongScreenShotTests.ShortcutRecorderRenderingTests testRecordingErrorAndCancelUpdateNativeLabel]' started.
+Test Case '-[LongScreenShotTests.ShortcutRecorderRenderingTests testRecordingErrorAndCancelUpdateNativeLabel]' passed (0.005 seconds).
+Test Suite 'ShortcutRecorderRenderingTests' passed at 2026-09-30 21:40:15.523.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.368 (0.368) seconds
+Test Suite 'StatusPopoverTests' started at 2026-09-30 21:40:15.523.
+Test Case '-[LongScreenShotTests.StatusPopoverTests testCommandsAndSeparatorsRetainTheirActionsWithoutMenuTracking]' started.
+Test Case '-[LongScreenShotTests.StatusPopoverTests testCommandsAndSeparatorsRetainTheirActionsWithoutMenuTracking]' passed (0.015 seconds).
+Test Case '-[LongScreenShotTests.StatusPopoverTests testEscapeRequestsPopoverDismissal]' started.
+Test Case '-[LongScreenShotTests.StatusPopoverTests testEscapeRequestsPopoverDismissal]' passed (0.000 seconds).
+Test Suite 'StatusPopoverTests' passed at 2026-09-30 21:40:15.538.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.015 (0.016) seconds
+Test Suite 'LongScreenShotPackageTests.xctest' passed at 2026-09-30 21:40:15.538.
+	 Executed 45 tests, with 0 failures (0 unexpected) in 4.156 (4.161) seconds
+Test Suite 'All tests' passed at 2026-09-30 21:40:15.538.
+	 Executed 45 tests, with 0 failures (0 unexpected) in 4.156 (4.162) seconds
+RetinaProfile copyMS=427.33003944158554 signatureMS=537.8875024616718 trackingMS=715.3551238588989
+RetinaPipeline frames=120 meanMS=14.403475692961365 peakBacklogMS=1.8470417087276765 queuedMiB=40.283203125
+RetinaProfile copyMS=121.44107837229967 signatureMS=193.82754480466247 trackingMS=436.4608768373728
+RetinaPipeline frames=120 meanMS=6.410151374681543 peakBacklogMS=0.0 queuedMiB=0.0
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
