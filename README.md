@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>一个常驻菜单栏的 macOS 截图工具。轻一点，顺一点，够日常用。</strong>
+  <strong>一个常驻菜单栏的 macOS 截图工具，轻、顺、免费。</strong>
 </p>
 
 <p align="center">
