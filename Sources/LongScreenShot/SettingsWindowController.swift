@@ -1,7 +1,8 @@
 import AppKit
+import Carbon
 
 final class SettingsWindowController: NSWindowController {
-    private enum Page: Int { case general, about }
+    private enum Page: Int { case general, shortcuts, about }
 
     private let topSegment = NSSegmentedControl(labels: [], trackingMode: .selectOne, target: nil, action: nil)
     private let pageContainer = NSView()
@@ -16,9 +17,12 @@ final class SettingsWindowController: NSWindowController {
     private let historyLimitField = NSTextField(string: "")
     private let historyLocationLabel = NSTextField(labelWithString: "")
     private let preferredWindowWidth: CGFloat = 700
-    private let generalContentHeight: CGFloat = 740
+    private let generalContentHeight: CGFloat = 650
+    private let shortcutsContentHeight: CGFloat = 700
     private let aboutContentHeight: CGFloat = 520
     private var currentPage: Page = .general
+    private var shortcutRecorders: [CaptureCommand: ToolShortcutRecorderView] = [:]
+    private var shortcutResetButtons: [NSButton: CaptureCommand] = [:]
 
     convenience init() {
         let window = NSWindow(
@@ -35,7 +39,8 @@ final class SettingsWindowController: NSWindowController {
     func refreshLanguage() {
         window?.title = L10n.tr("settings.title")
         topSegment.setLabel(L10n.tr("settings.general"), forSegment: 0)
-        topSegment.setLabel(L10n.tr("settings.about"), forSegment: 1)
+        topSegment.setLabel(L10n.tr("settings.shortcuts"), forSegment: 1)
+        topSegment.setLabel(L10n.tr("settings.about"), forSegment: 2)
         rebuildPage()
     }
 
@@ -57,7 +62,7 @@ final class SettingsWindowController: NSWindowController {
 
     private func buildShell() {
         guard let content = window?.contentView else { return }
-        topSegment.segmentCount = 2
+        topSegment.segmentCount = 3
         topSegment.selectedSegment = currentPage.rawValue
         topSegment.target = self
         topSegment.action = #selector(changePage)
@@ -71,7 +76,7 @@ final class SettingsWindowController: NSWindowController {
         NSLayoutConstraint.activate([
             topSegment.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             topSegment.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            topSegment.widthAnchor.constraint(equalToConstant: 220),
+            topSegment.widthAnchor.constraint(equalToConstant: 330),
             pageContainer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             pageContainer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             pageContainer.topAnchor.constraint(equalTo: topSegment.bottomAnchor, constant: 18),
@@ -92,6 +97,8 @@ final class SettingsWindowController: NSWindowController {
             switch currentPage {
             case .general:
                 buildGeneralPage()
+            case .shortcuts:
+                buildShortcutsPage()
             case .about:
                 buildAboutPage()
             }
@@ -102,7 +109,12 @@ final class SettingsWindowController: NSWindowController {
 
     private func resizeWindowForCurrentPage(animated: Bool) {
         guard let window else { return }
-        let contentHeight = currentPage == .general ? generalContentHeight : aboutContentHeight
+        let contentHeight: CGFloat
+        switch currentPage {
+        case .general: contentHeight = generalContentHeight
+        case .shortcuts: contentHeight = shortcutsContentHeight
+        case .about: contentHeight = aboutContentHeight
+        }
         let targetContentRect = NSRect(x: 0, y: 0, width: preferredWindowWidth, height: contentHeight)
         let targetFrameSize = window.frameRect(forContentRect: targetContentRect).size
         var frame = window.frame
@@ -163,12 +175,6 @@ final class SettingsWindowController: NSWindowController {
         let historyHint = NSTextField(wrappingLabelWithString: L10n.tr("settings.historyHint"))
         historyHint.textColor = .secondaryLabelColor
 
-        let hotKeyTitle = rowLabel("settings.hotkey")
-        recorder.configuration = .current
-        let restore = NSButton(title: L10n.tr("settings.restoreDefault"), target: self, action: #selector(restoreDefault))
-        let hint = NSTextField(wrappingLabelWithString: L10n.tr("settings.hotkeyHint"))
-        hint.textColor = .secondaryLabelColor
-
         let translationTitle = rowLabel("settings.translationProvider")
         configureTranslationPopup()
         let translationHint = NSTextField(wrappingLabelWithString: L10n.tr("settings.translationHint"))
@@ -186,7 +192,6 @@ final class SettingsWindowController: NSWindowController {
             historyTitle, historyCheckbox,
             historyLimitTitle, historyLimitField,
             historyLocationTitle, historyLocationLabel, chooseHistoryLocationButton, historyHint,
-            hotKeyTitle, recorder, restore, hint,
             translationTitle, translationPopup, translationHint,
             permissionLabel, permissionButton
         ].forEach {
@@ -240,20 +245,8 @@ final class SettingsWindowController: NSWindowController {
             historyHint.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
             historyHint.topAnchor.constraint(equalTo: historyLocationTitle.bottomAnchor, constant: 10),
 
-            hotKeyTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            hotKeyTitle.topAnchor.constraint(equalTo: historyHint.bottomAnchor, constant: 28),
-            recorder.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
-            recorder.centerYAnchor.constraint(equalTo: hotKeyTitle.centerYAnchor),
-            recorder.widthAnchor.constraint(equalToConstant: 220),
-            recorder.heightAnchor.constraint(equalToConstant: 34),
-            restore.leadingAnchor.constraint(equalTo: recorder.trailingAnchor, constant: 12),
-            restore.centerYAnchor.constraint(equalTo: recorder.centerYAnchor),
-            hint.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            hint.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
-            hint.topAnchor.constraint(equalTo: recorder.bottomAnchor, constant: 12),
-
             translationTitle.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            translationTitle.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 30),
+            translationTitle.topAnchor.constraint(equalTo: historyHint.bottomAnchor, constant: 30),
             translationPopup.leadingAnchor.constraint(equalTo: languagePopup.leadingAnchor),
             translationPopup.centerYAnchor.constraint(equalTo: translationTitle.centerYAnchor),
             translationPopup.widthAnchor.constraint(equalToConstant: 180),
@@ -266,6 +259,150 @@ final class SettingsWindowController: NSWindowController {
             permissionButton.leadingAnchor.constraint(equalTo: permissionLabel.trailingAnchor, constant: 18),
             permissionButton.centerYAnchor.constraint(equalTo: permissionLabel.centerYAnchor)
         ])
+    }
+
+    private func buildShortcutsPage() {
+        shortcutRecorders.removeAll()
+        shortcutResetButtons.removeAll()
+
+        let title = NSTextField(labelWithString: L10n.tr("settings.shortcuts"))
+        title.font = .systemFont(ofSize: 24, weight: .semibold)
+        let hint = NSTextField(wrappingLabelWithString: L10n.tr("settings.shortcutsHint"))
+        hint.textColor = .secondaryLabelColor
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        let documentView = ShortcutDocumentView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(stack)
+        scrollView.documentView = documentView
+
+        let globalHeader = shortcutGroupTitle("settings.shortcutsGlobal")
+        stack.addArrangedSubview(globalHeader)
+        let globalRow = shortcutRow(
+            title: L10n.tr("settings.hotkey"),
+            recorderView: recorder,
+            resetAction: #selector(restoreDefault)
+        )
+        recorder.configuration = .current
+        stack.addArrangedSubview(globalRow)
+
+        let globalHint = NSTextField(wrappingLabelWithString: L10n.tr("settings.hotkeyHint"))
+        globalHint.textColor = .secondaryLabelColor
+        globalHint.font = .systemFont(ofSize: 12)
+        globalHint.widthAnchor.constraint(equalToConstant: 590).isActive = true
+        stack.addArrangedSubview(globalHint)
+
+        let groups: [(String, Int)] = [
+            ("settings.shortcutsAnnotation", 0),
+            ("settings.shortcutsRecognition", 1),
+            ("settings.shortcutsActions", 2)
+        ]
+        for (key, group) in groups {
+            let groupTitle = shortcutGroupTitle(key)
+            stack.addArrangedSubview(groupTitle)
+
+            for command in CaptureCommand.allCases where command.group == group {
+                let recorderView = ToolShortcutRecorderView(command: command)
+                shortcutRecorders[command] = recorderView
+                let reset = NSButton(
+                    title: L10n.tr("settings.restoreDefault"),
+                    target: self,
+                    action: #selector(restoreToolShortcut(_:))
+                )
+                shortcutResetButtons[reset] = command
+                stack.addArrangedSubview(shortcutRow(
+                    title: command.title,
+                    recorderView: recorderView,
+                    resetButton: reset
+                ))
+            }
+        }
+
+        let restoreAll = NSButton(
+            title: L10n.tr("settings.restoreAllShortcuts"),
+            target: self,
+            action: #selector(restoreAllToolShortcuts)
+        )
+
+        [title, hint, scrollView, restoreAll].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            pageContainer.addSubview($0)
+        }
+
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: pageContainer.leadingAnchor, constant: 42),
+            title.topAnchor.constraint(equalTo: pageContainer.topAnchor, constant: 4),
+            hint.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            hint.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
+            hint.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 12),
+            scrollView.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor, constant: -42),
+            scrollView.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 14),
+            scrollView.bottomAnchor.constraint(equalTo: restoreAll.topAnchor, constant: -12),
+            restoreAll.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            restoreAll.bottomAnchor.constraint(equalTo: pageContainer.bottomAnchor, constant: -20),
+
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -12)
+        ])
+    }
+
+    private func shortcutGroupTitle(_ key: String) -> NSTextField {
+        let label = NSTextField(labelWithString: L10n.tr(key))
+        label.font = .systemFont(ofSize: 14, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func shortcutRow(
+        title: String,
+        recorderView: NSView,
+        resetAction: Selector
+    ) -> NSView {
+        shortcutRow(
+            title: title,
+            recorderView: recorderView,
+            resetButton: NSButton(
+                title: L10n.tr("settings.restoreDefault"),
+                target: self,
+                action: resetAction
+            )
+        )
+    }
+
+    private func shortcutRow(
+        title: String,
+        recorderView: NSView,
+        resetButton: NSButton
+    ) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 12
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 14, weight: .medium)
+        label.widthAnchor.constraint(equalToConstant: 210).isActive = true
+        recorderView.widthAnchor.constraint(equalToConstant: 210).isActive = true
+        recorderView.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        resetButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(recorderView)
+        row.addArrangedSubview(resetButton)
+        row.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        return row
     }
 
     private func buildAboutPage() {
@@ -451,6 +588,21 @@ final class SettingsWindowController: NSWindowController {
         HotKeyConfiguration.current = .defaultValue
         recorder.configuration = .defaultValue
     }
+
+    @objc private func restoreToolShortcut(_ sender: NSButton) {
+        guard let command = shortcutResetButtons[sender] else { return }
+        ToolShortcutStore.restoreDefault(for: command)
+        shortcutRecorders[command]?.refreshConfiguration()
+    }
+
+    @objc private func restoreAllToolShortcuts() {
+        ToolShortcutStore.restoreAllDefaults()
+        shortcutRecorders.values.forEach { $0.refreshConfiguration() }
+    }
+}
+
+private final class ShortcutDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 
@@ -673,19 +825,22 @@ final class UpdateChecker {
 final class HotKeyRecorderView: NSView {
     var configuration: HotKeyConfiguration = .current { didSet { needsDisplay = true } }
     private var recording = false
+    private var validationMessage: String?
 
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
         recording = true
+        validationMessage = nil
         window?.makeFirstResponder(self)
         needsDisplay = true
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { recording = false; needsDisplay = true; return }
+        if event.keyCode == 53 { recording = false; validationMessage = nil; needsDisplay = true; return }
         if event.keyCode == 51 || event.keyCode == 117 {
             configuration = .defaultValue
             HotKeyConfiguration.current = configuration
+            validationMessage = nil
             recording = false
             return
         }
@@ -693,11 +848,19 @@ final class HotKeyRecorderView: NSView {
         guard relevant.contains(.command) || relevant.contains(.option) || relevant.contains(.control) else {
             NSSound.beep(); return
         }
-        configuration = HotKeyConfiguration(
+        let proposed = HotKeyConfiguration(
             keyCode: UInt32(event.keyCode),
             carbonModifiers: GlobalHotKey.carbonFlags(from: relevant)
         )
+        if let conflict = ToolShortcutStore.conflictingCommand(for: proposed) {
+            validationMessage = L10n.format("settings.shortcutConflict", conflict.title)
+            NSSound.beep()
+            needsDisplay = true
+            return
+        }
+        configuration = proposed
         HotKeyConfiguration.current = configuration
+        validationMessage = nil
         recording = false
     }
 
@@ -709,18 +872,139 @@ final class HotKeyRecorderView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
-        (recording ? NSColor.controlAccentColor.withAlphaComponent(0.18) : NSColor.controlBackgroundColor).setFill()
+        let hasError = validationMessage != nil
+        (recording ? NSColor.controlAccentColor.withAlphaComponent(0.18) : (hasError ? NSColor.systemRed.withAlphaComponent(0.12) : NSColor.controlBackgroundColor)).setFill()
         path.fill()
-        (recording ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
-        path.lineWidth = recording ? 2 : 1
+        (hasError ? NSColor.systemRed : (recording ? NSColor.controlAccentColor : NSColor.separatorColor)).setStroke()
+        path.lineWidth = recording || hasError ? 2 : 1
         path.stroke()
-        let text = recording ? L10n.tr("settings.recordHotKey") : configuration.displayString
+        let text = validationMessage ?? (recording ? L10n.tr("settings.recordHotKey") : configuration.displayString)
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 16, weight: .medium),
-            .foregroundColor: NSColor.labelColor
+            .font: NSFont.monospacedSystemFont(ofSize: hasError ? 11 : 16, weight: .medium),
+            .foregroundColor: hasError ? NSColor.systemRed : NSColor.labelColor
         ]
         let size = text.size(withAttributes: attrs)
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
+    }
+}
+
+final class ToolShortcutRecorderView: NSView {
+    let command: CaptureCommand
+    private var configuration: HotKeyConfiguration
+    private var recording = false
+    private var validationMessage: String?
+    private var observer: NSObjectProtocol?
+
+    init(command: CaptureCommand) {
+        self.command = command
+        self.configuration = ToolShortcutStore.configuration(for: command)
+        super.init(frame: .zero)
+        toolTip = L10n.tr("settings.toolShortcutHint")
+        observer = NotificationCenter.default.addObserver(
+            forName: .toolShortcutsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshConfiguration()
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    func refreshConfiguration() {
+        configuration = ToolShortcutStore.configuration(for: command)
+        validationMessage = nil
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        recording = true
+        validationMessage = nil
+        window?.makeFirstResponder(self)
+        needsDisplay = true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == UInt16(kVK_Escape) {
+            recording = false
+            validationMessage = nil
+            needsDisplay = true
+            return
+        }
+        if event.keyCode == UInt16(kVK_Delete) || event.keyCode == UInt16(kVK_ForwardDelete) {
+            ToolShortcutStore.restoreDefault(for: command)
+            refreshConfiguration()
+            recording = false
+            return
+        }
+
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let proposed = HotKeyConfiguration(
+            keyCode: UInt32(event.keyCode),
+            carbonModifiers: GlobalHotKey.carbonFlags(from: flags)
+        )
+        switch ToolShortcutStore.assign(proposed, to: command) {
+        case .saved:
+            configuration = proposed.normalized
+            validationMessage = nil
+            recording = false
+            window?.makeFirstResponder(nil)
+        case let .conflict(other):
+            validationMessage = L10n.format("settings.shortcutConflict", other.title)
+            NSSound.beep()
+        case .conflictsWithGlobalCapture:
+            validationMessage = L10n.tr("settings.shortcutGlobalConflict")
+            NSSound.beep()
+        case .reserved:
+            validationMessage = L10n.tr("settings.shortcutReserved")
+            NSSound.beep()
+        }
+        needsDisplay = true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        recording = false
+        needsDisplay = true
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: 7,
+            yRadius: 7
+        )
+        let hasError = validationMessage != nil
+        let fill = recording
+            ? NSColor.controlAccentColor.withAlphaComponent(0.18)
+            : (hasError ? NSColor.systemRed.withAlphaComponent(0.12) : NSColor.controlBackgroundColor)
+        fill.setFill()
+        path.fill()
+        (hasError ? NSColor.systemRed : (recording ? NSColor.controlAccentColor : NSColor.separatorColor)).setStroke()
+        path.lineWidth = recording || hasError ? 2 : 1
+        path.stroke()
+
+        let text = validationMessage
+            ?? (recording ? L10n.tr("settings.recordHotKey") : configuration.displayString)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: validationMessage == nil ? 14 : 11, weight: .medium),
+            .foregroundColor: hasError ? NSColor.systemRed : NSColor.labelColor
+        ]
+        let size = text.size(withAttributes: attributes)
+        let point = NSPoint(
+            x: max(5, (bounds.width - min(size.width, bounds.width - 10)) / 2),
+            y: (bounds.height - size.height) / 2
+        )
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds.insetBy(dx: 5, dy: 0)).addClip()
+        text.draw(at: point, withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
     }
 }
 

@@ -6,6 +6,14 @@ final class CaptureOverlayWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+private extension Notification.Name {
+    static let captureOverlayLongCaptureFocusedScreen = Notification.Name("CaptureOverlayLongCaptureFocusedScreen")
+}
+
+private func CaptureOverlayScreenNumber(_ screen: NSScreen) -> NSNumber? {
+    screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+}
+
 final class OverlayWindowController: NSWindowController, CaptureOverlayViewDelegate {
     var onCancel: (() -> Void)?
     var onComplete: ((CGImage, CaptureCompletionAction, NSScreen, CGRect?) -> Void)?
@@ -15,6 +23,7 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     private var longCaptureToolbarController: LongCaptureToolbarController?
     private var manualLongCaptureFinishing = false
     private var escapeHotKey: GlobalHotKey?
+    private var focusedScreenObserver: NSObjectProtocol?
 
     init(snapshot: ScreenSnapshot, startsInLongMode: Bool) {
         self.snapshot = snapshot
@@ -37,6 +46,22 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
         view.delegate = self
         view.startsInLongMode = startsInLongMode
         window.contentView = view
+        focusedScreenObserver = NotificationCenter.default.addObserver(
+            forName: .captureOverlayLongCaptureFocusedScreen,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let target = notification.userInfo?["screenNumber"] as? NSNumber,
+                  let own = CaptureOverlayScreenNumber(self.snapshot.screen) else { return }
+            if target.uint32Value == own.uint32Value {
+                self.window?.orderFrontRegardless()
+            } else {
+                // 长截图只保留当前截图所在屏幕的交互层。其他显示器上的覆盖窗口
+                // 必须彻底隐藏，否则会留下整屏半透明遮罩。
+                self.window?.orderOut(nil)
+            }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -64,6 +89,8 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
         longCaptureToolbarController?.close()
         longCaptureToolbarController = nil
         escapeHotKey = nil
+        if let focusedScreenObserver { NotificationCenter.default.removeObserver(focusedScreenObserver) }
+        focusedScreenObserver = nil
         onCancel = nil
         onComplete = nil
         NSCursor.pop()
@@ -80,6 +107,13 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     func overlayRequestedLongCapture(_ view: CaptureOverlayView) {
         guard let selection = view.selection, let window else { return }
         guard let detachedToolbar = view.beginManualLongCapture() else { return }
+        if let screenNumber = CaptureOverlayScreenNumber(snapshot.screen) {
+            NotificationCenter.default.post(
+                name: .captureOverlayLongCaptureFocusedScreen,
+                object: nil,
+                userInfo: ["screenNumber": screenNumber]
+            )
+        }
         window.displayIfNeeded()
         window.ignoresMouseEvents = true
 
@@ -102,8 +136,9 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
             excludedWindowIDs: excludedWindowIDs
         )
         longCaptureService = service
-        service.onPreview = { [weak view] image, count in
-            view?.updateManualLongCapturePreview(image: image, frameCount: count)
+        LongCaptureDiagnostics.shared.log("overlay.longCapture.start window=\(window.windowNumber) toolbar=\(toolbarController.window?.windowNumber ?? -1) selection=\(selection)")
+        service.onPreviewSegment = { [weak view] segment, count in
+            view?.appendManualLongCapturePreviewSegment(segment, frameCount: count)
         }
         service.onStatus = { [weak view] text, isError in
             view?.setManualLongCaptureStatus(text, isError: isError)
@@ -225,6 +260,7 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     private var manualLongCaptureActive = false
     private var manualToolbarOverlayFrame: CGRect?
     private var manualPreviewImage: NSImage?
+    private var manualPreviewPanel: ManualLongCapturePreviewPanelView?
     private var manualFrameCount = 0
     private var manualCaptureStatus = L10n.tr("long.scrollHint")
     private var manualCaptureStatusIsError = false
@@ -264,7 +300,13 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         toolbar = nil
         clearMosaicPreviewCache()
         ImageEffects.clearCaches()
+        if NSColorPanel.shared.isVisible {
+            NSColorPanel.shared.close()
+            NSColorPanel.shared.level = .normal
+        }
         manualPreviewImage = nil
+        manualPreviewPanel?.removeFromSuperview()
+        manualPreviewPanel = nil
         annotations.removeAll(keepingCapacity: false)
         undoSnapshots.removeAll(keepingCapacity: false)
         redoSnapshots.removeAll(keepingCapacity: false)
@@ -353,6 +395,12 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "z" {
             if event.modifierFlags.contains(.shift) { redoLastAnnotation() }
             else { undoLastAnnotation() }
+            return
+        }
+        if inlineTextField == nil,
+           selection != nil,
+           let command = ToolShortcutStore.command(matching: event) {
+            toolbar?.perform(command)
             return
         }
         super.keyDown(with: event)
@@ -1226,6 +1274,9 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     func toolbar(_ toolbar: CaptureToolbarView, hoveredDescription description: String?) {
         showToolbarTooltip(description)
     }
+    func toolbar(_ toolbar: CaptureToolbarView, requestedShortcutFor command: CaptureCommand) {
+        showShortcutPanel(for: command, toolbar: toolbar)
+    }
     func toolbarRequestedCancel(_ toolbar: CaptureToolbarView) {
         cancelInlineTextEditing()
         if manualLongCaptureActive { delegate?.overlayRequestedCancelLongCapture(self) }
@@ -1255,6 +1306,8 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         guard let toolbar else { return nil }
         manualLongCaptureActive = true
         manualPreviewImage = nil
+        manualPreviewPanel?.removeFromSuperview()
+        manualPreviewPanel = nil
         let frame = toolbar.frame
         manualToolbarOverlayFrame = frame
         commitInlineTextEditing()
@@ -1275,23 +1328,34 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
         guard let tool, let toolbar, let selection else { return }
         let mode: AnnotationStylePanelView.Mode
         let value: CGFloat
+        let command: CaptureCommand
         switch tool {
         case .text:
             mode = .text
             value = textSize
+            command = .text
         case .rectangle, .ellipse, .arrow, .pen:
             mode = .stroke
             value = strokeWidth
+            switch tool {
+            case .rectangle: command = .rectangle
+            case .ellipse: command = .ellipse
+            case .arrow: command = .arrow
+            case .pen: command = .pen
+            default: command = .rectangle
+            }
         case .mosaicPixel, .mosaicBlur:
             mode = .mosaic
             value = mosaicIntensity
+            command = .mosaic
         }
 
         let panel = AnnotationStylePanelView(
             mode: mode,
             color: annotationColor,
             value: value,
-            mosaicStyle: mosaicStyle
+            mosaicStyle: mosaicStyle,
+            shortcutCommand: command
         )
         panel.onColorChange = { [weak self] color in
             guard let self else { return }
@@ -1320,6 +1384,25 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
             self.activeTool = style == .pixel ? .mosaicPixel : .mosaicBlur
             self.updateSelectedAnnotationStyle(mode: .mosaic)
         }
+        addSubview(panel)
+        let size = panel.fittingSize
+        panel.frame = stylePanelFrame(
+            size: size,
+            toolbarFrame: toolbar.frame,
+            selection: selection
+        )
+        stylePanel = panel
+    }
+
+    private func showShortcutPanel(for command: CaptureCommand, toolbar: CaptureToolbarView) {
+        guard let selection else { return }
+        stylePanel?.removeFromSuperview()
+        let panel = AnnotationStylePanelView(
+            mode: .shortcut,
+            color: annotationColor,
+            value: 0,
+            shortcutCommand: command
+        )
         addSubview(panel)
         let size = panel.fittingSize
         panel.frame = stylePanelFrame(
@@ -1676,6 +1759,8 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     func updateManualLongCapturePreview(image: CGImage, frameCount: Int) {
+        // 兼容旧回调：正常长截图实时预览已经走 appendManualLongCapturePreviewSegment，
+        // 不再在 draw(_:) 中反复绘制整张 manualPreviewImage。
         manualPreviewImage = NSImage(
             cgImage: image,
             size: NSSize(width: image.width, height: image.height)
@@ -1685,13 +1770,54 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
             ? L10n.format("long.frames", frameCount)
             : L10n.tr("long.scrollInSelection")
         manualCaptureStatusIsError = false
-        invalidateManualMinimap()
+        updateManualPreviewPanelLayout()
+    }
+
+    func appendManualLongCapturePreviewSegment(_ segment: LongCapturePreviewSegment, frameCount: Int) {
+        manualFrameCount = frameCount
+        manualCaptureStatus = frameCount > 1
+            ? L10n.format("long.frames", frameCount)
+            : L10n.tr("long.scrollInSelection")
+        manualCaptureStatusIsError = false
+
+        let panel = ensureManualPreviewPanel()
+        panel.append(segment)
+        panel.setStatus(manualCaptureStatus, isError: false)
     }
 
     func setManualLongCaptureStatus(_ text: String, isError: Bool) {
         manualCaptureStatus = text
         manualCaptureStatusIsError = isError
-        invalidateManualMinimap()
+        manualPreviewPanel?.setStatus(text, isError: isError)
+    }
+
+    private func ensureManualPreviewPanel() -> ManualLongCapturePreviewPanelView {
+        if let manualPreviewPanel { return manualPreviewPanel }
+        let panel = ManualLongCapturePreviewPanelView(frame: .zero)
+        panel.isHidden = !manualLongCaptureActive
+        addSubview(panel)
+        manualPreviewPanel = panel
+        updateManualPreviewPanelLayout()
+        return panel
+    }
+
+    private func updateManualPreviewPanelLayout() {
+        guard manualLongCaptureActive, let selection, let panel = manualPreviewPanel else {
+            needsDisplay = true
+            return
+        }
+        let target = manualPreviewPanelFrame(in: selection)
+        let shouldHide = target.width < 36 || target.height < 80
+        if panel.isHidden != shouldHide { panel.isHidden = shouldHide }
+        var frameChanged = false
+        if !shouldHide, panel.frame.integral != target.integral {
+            panel.frame = target
+            frameChanged = true
+        }
+        panel.needsLayout = true
+        // The full-screen overlay only needs a redraw when the preview cut-out moves.
+        // Segment/status updates stay entirely inside the preview panel.
+        if frameChanged { needsDisplay = true }
     }
 
     private func showToolbarTooltip(_ text: String?) {
@@ -1719,7 +1845,19 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     private func drawManualLongCaptureFrame() {
-        guard let selection else { return }
+        guard let selection,
+              let context = NSGraphicsContext.current?.cgContext else { return }
+
+        // 长截图开始后，当前屏幕仍保留和普通截图一致的半透明遮罩；
+        // 只有真正的截图工作区保持完全透明。覆盖窗口本身被 ScreenCaptureKit 排除，
+        // 所以遮罩、边框和外侧缩略图都不会进入最终长图。
+        context.saveGState()
+        context.setFillColor(NSColor.black.withAlphaComponent(0.48).cgColor)
+        context.addRect(bounds)
+        context.addRect(selection)
+        context.fillPath(using: .evenOdd)
+        context.restoreGState()
+
         NSColor.controlAccentColor.setStroke()
         let border = NSBezierPath(rect: selection.insetBy(dx: 1.5, dy: 1.5))
         border.lineWidth = 3
@@ -1735,84 +1873,215 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
             at: CGPoint(x: selection.minX + 4, y: min(bounds.maxY - 22, selection.maxY + 5)),
             withAttributes: attributes
         )
-        drawManualMinimap(in: selection)
     }
 
-    private func drawManualMinimap(in selection: CGRect) {
-        let minimap = manualMinimapFrame(in: selection)
-        guard minimap.width >= 72, minimap.height >= 100 else { return }
-
-        let background = NSBezierPath(roundedRect: minimap, xRadius: 8, yRadius: 8)
-        NSColor.white.withAlphaComponent(0.55).setStroke()
-        background.lineWidth = 1.5
-        background.stroke()
-
-        let title = L10n.tr("long.minimapTitle")
-        title.draw(at: CGPoint(x: minimap.minX + 9, y: minimap.maxY - 23), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.white
-        ])
-
-        let statusColor = manualCaptureStatusIsError ? NSColor.systemRed : NSColor.white.withAlphaComponent(0.82)
-        let status = manualFrameCount > 0 && !manualCaptureStatusIsError
-            ? "\(manualCaptureStatus)"
-            : manualCaptureStatus
-        status.draw(in: CGRect(x: minimap.minX + 9, y: minimap.minY + 7, width: minimap.width - 18, height: 34), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
-            .foregroundColor: statusColor
-        ])
-
-        guard let manualPreviewImage else { return }
-        let content = CGRect(
-            x: minimap.minX + 8,
-            y: minimap.minY + 42,
-            width: minimap.width - 16,
-            height: minimap.height - 72
-        )
-        guard content.width > 0, content.height > 0 else { return }
-        func fittedRect(for image: NSImage) -> CGRect {
-            // 当长图高度超过 minimap 时，按高度等比缩小；高度贴满 minimap，宽度随比例变窄。
-            // 这是 ScreenSnap 这类 minimap 的稳定显示方式：只做等比缩放，不做纵向压缩/重采样变形。
-            let scale = min(content.width / max(1, image.size.width), content.height / max(1, image.size.height))
-            let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
-            return CGRect(
-                x: content.midX - size.width / 2,
-                y: content.maxY - size.height,
-                width: size.width,
-                height: size.height
-            )
-        }
-        let imageRect = fittedRect(for: manualPreviewImage)
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(roundedRect: content, xRadius: 4, yRadius: 4).addClip()
-        manualPreviewImage.draw(in: imageRect)
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func manualMinimapFrame(in selection: CGRect) -> CGRect {
-        let desiredWidth = min(210, max(110, selection.width * 0.24))
-        let width = min(selection.width - 16, desiredWidth)
-        let height = selection.height - 16
+    private var localVisibleScreenFrame: CGRect {
+        let screenFrame = snapshot.screen.frame
+        let visibleFrame = snapshot.screen.visibleFrame
         return CGRect(
-            x: selection.maxX - width - 8,
-            y: selection.minY + 8,
-            width: width,
-            height: height
-        )
+            x: visibleFrame.minX - screenFrame.minX,
+            y: visibleFrame.minY - screenFrame.minY,
+            width: visibleFrame.width,
+            height: visibleFrame.height
+        ).intersection(bounds)
+    }
+
+    private func manualPreviewPanelFrame(in selection: CGRect) -> CGRect {
+        // 缩略图固定放在截图框外侧。高度从截图框底部一直延伸到菜单栏下沿；
+        // 内容越长，ManualLongCapturePreviewPanelView 会在这个固定高度内等比缩小。
+        let visible = localVisibleScreenFrame
+        let gap: CGFloat = 10
+        let rightAvailable = max(0, visible.maxX - selection.maxX - gap)
+        let leftAvailable = max(0, selection.minX - visible.minX - gap)
+        let placeOnRight = rightAvailable >= leftAvailable
+        let availableWidth = placeOnRight ? rightAvailable : leftAvailable
+        guard availableWidth >= 36 else { return .zero }
+
+        let desiredWidth = min(220, max(104, selection.width * 0.22))
+        let width = min(desiredWidth, availableWidth)
+        let bottom = max(visible.minY, selection.minY)
+        let height = max(0, visible.maxY - bottom)
+        guard height >= 80 else { return .zero }
+
+        let x = placeOnRight
+            ? selection.maxX + gap
+            : selection.minX - gap - width
+        return CGRect(x: x, y: bottom, width: width, height: height)
+            .intersection(visible)
+            .integral
     }
 
     private func invalidateManualMinimap() {
-        guard manualLongCaptureActive, let selection else {
-            needsDisplay = true
+        updateManualPreviewPanelLayout()
+    }
+}
+
+private final class ManualLongCapturePreviewPanelView: NSView {
+    private final class FlippedContentView: NSView {
+        override var isFlipped: Bool { true }
+    }
+
+    private let clipView = NSView()
+    private let contentView = FlippedContentView()
+    private let statusLabel = NSTextField(labelWithString: "")
+    private var knownSerials = Set<Int>()
+    private var tileLayers: [Int: CALayer] = [:]
+    private var naturalWidth: CGFloat = 1
+    private var naturalHeight: CGFloat = 0
+    private var isApplyingLayout = false
+    private var appendedSegmentCount = 0
+    private var layoutPassCount = 0
+    private var lastLayoutScale: CGFloat = 1
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.28).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.55).cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 7
+        layer?.masksToBounds = true
+
+        clipView.wantsLayer = true
+        clipView.layer?.backgroundColor = NSColor.clear.cgColor
+        clipView.layer?.cornerRadius = 5
+        clipView.layer?.masksToBounds = true
+        addSubview(clipView)
+
+        contentView.wantsLayer = true
+        contentView.layer?.backgroundColor = NSColor.clear.cgColor
+        contentView.layer?.isGeometryFlipped = true
+        contentView.layer?.masksToBounds = true
+        clipView.addSubview(contentView)
+
+        statusLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        statusLabel.textColor = NSColor.white.withAlphaComponent(0.85)
+        statusLabel.alignment = .center
+        statusLabel.backgroundColor = NSColor.black.withAlphaComponent(0.35)
+        statusLabel.drawsBackground = true
+        statusLabel.isBezeled = false
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.wantsLayer = true
+        statusLabel.layer?.cornerRadius = 4
+        statusLabel.layer?.masksToBounds = true
+        addSubview(statusLabel)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func append(_ segment: LongCapturePreviewSegment) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        guard !knownSerials.contains(segment.serial) else {
+            LongCaptureDiagnostics.shared.log("preview.panel.skipKnown serial=\(segment.serial) top=\(segment.previewTop)")
             return
         }
+        knownSerials.insert(segment.serial)
+        appendedSegmentCount += 1
+        naturalWidth = max(naturalWidth, CGFloat(segment.previewWidth))
+        naturalHeight = max(naturalHeight, CGFloat(segment.previewContentHeight))
 
-        setNeedsDisplay(manualMinimapFrame(in: selection).insetBy(dx: -3, dy: -3))
+        let tileKey = segment.previewTop
+        let imageLayer: CALayer
+        if let existing = tileLayers[tileKey] {
+            imageLayer = existing
+        } else {
+            imageLayer = CALayer()
+            imageLayer.contentsGravity = .resize
+            imageLayer.magnificationFilter = .linear
+            imageLayer.minificationFilter = .linear
+            imageLayer.actions = [
+                "position": NSNull(),
+                "bounds": NSNull(),
+                "contents": NSNull(),
+                "transform": NSNull()
+            ]
+            tileLayers[tileKey] = imageLayer
+            contentView.layer?.addSublayer(imageLayer)
+        }
+        imageLayer.frame = CGRect(
+            x: 0,
+            y: CGFloat(segment.previewTop),
+            width: CGFloat(segment.previewWidth),
+            height: CGFloat(segment.previewHeight)
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageLayer.contents = segment.image
+        CATransaction.commit()
+        needsLayout = true
+
+        let durationMS = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+        if appendedSegmentCount <= 10 || appendedSegmentCount % 20 == 0 || durationMS >= 3 {
+            LongCaptureDiagnostics.shared.log("preview.panel.append count=\(appendedSegmentCount) serial=\(segment.serial) tileTop=\(segment.previewTop) tileHeight=\(segment.previewHeight) natural=\(Int(naturalWidth))x\(Int(naturalHeight)) layers=\(tileLayers.count) durationMS=\(String(format: "%.2f", durationMS))")
+        }
+    }
+
+    func setStatus(_ text: String, isError: Bool) {
+        if statusLabel.stringValue != text { statusLabel.stringValue = text }
+        let color: NSColor = isError ? .systemRed : NSColor.white.withAlphaComponent(0.85)
+        if statusLabel.textColor != color { statusLabel.textColor = color }
+    }
+
+    override func layout() {
+        super.layout()
+        layoutPreview()
+    }
+
+    private func layoutPreview() {
+        guard !isApplyingLayout else { return }
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        isApplyingLayout = true
+        layoutPassCount += 1
+        defer { isApplyingLayout = false }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        NSAnimationContext.current.duration = 0
+
+        let statusHeight: CGFloat = statusLabel.stringValue.isEmpty ? 0 : 20
+        let inset: CGFloat = 4
+        let contentBottom = inset + (statusHeight > 0 ? statusHeight + 2 : 0)
+        let clipFrame = CGRect(
+            x: inset,
+            y: contentBottom,
+            width: max(1, bounds.width - inset * 2),
+            height: max(1, bounds.height - contentBottom - inset)
+        )
+        if clipView.frame != clipFrame { clipView.frame = clipFrame }
+        if statusHeight > 0 {
+            let statusFrame = CGRect(x: inset, y: inset, width: bounds.width - inset * 2, height: statusHeight)
+            if statusLabel.frame != statusFrame { statusLabel.frame = statusFrame }
+            statusLabel.isHidden = false
+        } else {
+            statusLabel.isHidden = true
+        }
+
+        let maxWidth = max(1, clipView.bounds.width)
+        let maxHeight = max(1, clipView.bounds.height)
+        let scale = min(1, maxWidth / max(1, naturalWidth), maxHeight / max(1, naturalHeight))
+        let contentSize = CGSize(width: naturalWidth * scale, height: naturalHeight * scale)
+        let frame = CGRect(
+            x: round((maxWidth - contentSize.width) / 2),
+            y: 0,
+            width: max(1, contentSize.width),
+            height: max(1, contentSize.height)
+        )
+        if contentView.frame != frame { contentView.frame = frame }
+        let boundsRect = CGRect(x: 0, y: 0, width: max(1, naturalWidth), height: max(1, naturalHeight))
+        if contentView.bounds != boundsRect { contentView.bounds = boundsRect }
+
+        CATransaction.commit()
+        let durationMS = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+        let scaleChanged = abs(scale - lastLayoutScale) >= 0.01
+        lastLayoutScale = scale
+        if layoutPassCount <= 10 || layoutPassCount % 20 == 0 || durationMS >= 3 || scaleChanged {
+            LongCaptureDiagnostics.shared.log("preview.panel.layout pass=\(layoutPassCount) bounds=\(Int(bounds.width))x\(Int(bounds.height)) natural=\(Int(naturalWidth))x\(Int(naturalHeight)) scale=\(String(format: "%.4f", Double(scale))) layers=\(tileLayers.count) durationMS=\(String(format: "%.2f", durationMS))")
+        }
     }
 }
 
 final class AnnotationStylePanelView: NSVisualEffectView {
-    enum Mode: Equatable { case text, stroke, mosaic }
+    enum Mode: Equatable { case text, stroke, mosaic, shortcut }
 
     var onColorChange: ((NSColor) -> Void)?
     var onValueChange: ((CGFloat) -> Void)?
@@ -1821,9 +2090,18 @@ final class AnnotationStylePanelView: NSVisualEffectView {
     private let slider = NSSlider()
     private let valueLabel = NSTextField(labelWithString: "")
     private let mode: Mode
+    private let shortcutCommand: CaptureCommand?
+    private var colorWell: NSColorWell?
 
-    init(mode: Mode, color: NSColor, value: CGFloat, mosaicStyle: MosaicStyle = .pixel) {
+    init(
+        mode: Mode,
+        color: NSColor,
+        value: CGFloat,
+        mosaicStyle: MosaicStyle = .pixel,
+        shortcutCommand: CaptureCommand? = nil
+    ) {
         self.mode = mode
+        self.shortcutCommand = shortcutCommand
         super.init(frame: .zero)
         material = .hudWindow
         blendingMode = .withinWindow
@@ -1834,7 +2112,13 @@ final class AnnotationStylePanelView: NSVisualEffectView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var fittingSize: NSSize { NSSize(width: mode == .mosaic ? 286 : 326, height: 44) }
+    override var fittingSize: NSSize {
+        switch mode {
+        case .shortcut: return NSSize(width: 270, height: 44)
+        case .mosaic: return NSSize(width: shortcutCommand == nil ? 286 : 410, height: 44)
+        case .text, .stroke: return NSSize(width: shortcutCommand == nil ? 352 : 476, height: 44)
+        }
+    }
 
     private func buildUI(selectedColor: NSColor, value: CGFloat, mosaicStyle: MosaicStyle) {
         let stack = NSStackView()
@@ -1844,7 +2128,14 @@ final class AnnotationStylePanelView: NSVisualEffectView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        let title = NSTextField(labelWithString: mode == .text ? L10n.tr("style.text") : (mode == .stroke ? L10n.tr("style.stroke") : L10n.tr("style.mosaic")))
+        let titleText: String
+        switch mode {
+        case .text: titleText = L10n.tr("style.text")
+        case .stroke: titleText = L10n.tr("style.stroke")
+        case .mosaic: titleText = L10n.tr("style.mosaic")
+        case .shortcut: titleText = shortcutCommand?.title ?? L10n.tr("settings.shortcuts")
+        }
+        let title = NSTextField(labelWithString: titleText)
         title.font = .systemFont(ofSize: 11, weight: .semibold)
         stack.addArrangedSubview(title)
 
@@ -1853,7 +2144,7 @@ final class AnnotationStylePanelView: NSVisualEffectView {
             styles.selectedSegment = mosaicStyle == .pixel ? 0 : 1
             styles.widthAnchor.constraint(equalToConstant: 104).isActive = true
             stack.addArrangedSubview(styles)
-        } else {
+        } else if mode != .shortcut {
             let palette: [(String, NSColor)] = [
                 (L10n.tr("color.red"), .systemRed), (L10n.tr("color.orange"), .systemOrange), (L10n.tr("color.yellow"), .systemYellow),
                 (L10n.tr("color.green"), .systemGreen), (L10n.tr("color.blue"), .systemBlue), (L10n.tr("color.white"), .white), (L10n.tr("color.black"), .black)
@@ -1872,28 +2163,55 @@ final class AnnotationStylePanelView: NSVisualEffectView {
                 colorButtons[button] = color
                 stack.addArrangedSubview(button)
             }
+
+            let well = CaptureColorWell(frame: .zero)
+            well.color = selectedColor
+            well.toolTip = L10n.tr("color.custom")
+            well.target = self
+            well.action = #selector(changeCustomColor(_:))
+            well.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            colorWell = well
+            stack.addArrangedSubview(well)
         }
 
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        separator.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        stack.addArrangedSubview(separator)
+        if mode != .shortcut {
+            let separator = NSBox()
+            separator.boxType = .separator
+            separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
+            separator.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            stack.addArrangedSubview(separator)
 
-        slider.minValue = mode == .text ? 12 : (mode == .mosaic ? 4 : 1)
-        slider.maxValue = mode == .text ? 72 : (mode == .mosaic ? 40 : 24)
-        slider.doubleValue = Double(value)
-        slider.isContinuous = true
-        slider.target = self
-        slider.action = #selector(changeValue(_:))
-        slider.widthAnchor.constraint(equalToConstant: 72).isActive = true
-        stack.addArrangedSubview(slider)
+            slider.minValue = mode == .text ? 12 : (mode == .mosaic ? 4 : 1)
+            slider.maxValue = mode == .text ? 72 : (mode == .mosaic ? 40 : 24)
+            slider.doubleValue = Double(value)
+            slider.isContinuous = true
+            slider.target = self
+            slider.action = #selector(changeValue(_:))
+            slider.widthAnchor.constraint(equalToConstant: 72).isActive = true
+            stack.addArrangedSubview(slider)
 
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        valueLabel.alignment = .right
-        valueLabel.widthAnchor.constraint(equalToConstant: 25).isActive = true
-        stack.addArrangedSubview(valueLabel)
-        updateValueLabel()
+            valueLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+            valueLabel.alignment = .right
+            valueLabel.widthAnchor.constraint(equalToConstant: 25).isActive = true
+            stack.addArrangedSubview(valueLabel)
+            updateValueLabel()
+        }
+
+        if let shortcutCommand {
+            let separator = NSBox()
+            separator.boxType = .separator
+            separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
+            separator.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            stack.addArrangedSubview(separator)
+            let shortcutLabel = NSTextField(labelWithString: L10n.tr("settings.shortcut"))
+            shortcutLabel.font = .systemFont(ofSize: 10, weight: .medium)
+            stack.addArrangedSubview(shortcutLabel)
+            let recorder = ToolShortcutRecorderView(command: shortcutCommand)
+            recorder.widthAnchor.constraint(equalToConstant: 76).isActive = true
+            recorder.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            stack.addArrangedSubview(recorder)
+        }
 
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
@@ -1905,7 +2223,16 @@ final class AnnotationStylePanelView: NSVisualEffectView {
     @objc private func selectColor(_ sender: NSButton) {
         guard let color = colorButtons[sender] else { return }
         colorButtons.keys.forEach { $0.layer?.borderWidth = $0 === sender ? 2 : 0.5 }
+        colorWell?.color = color
         onColorChange?(color)
+    }
+
+    @objc private func changeCustomColor(_ sender: NSColorWell) {
+        HSLColorAccessoryView.shared.sync(from: sender.color)
+        colorButtons.forEach { button, color in
+            button.layer?.borderWidth = colorsMatch(color, sender.color) ? 2 : 0.5
+        }
+        onColorChange?(sender.color)
     }
 
     @objc private func changeValue(_ sender: NSSlider) {
@@ -1922,6 +2249,159 @@ final class AnnotationStylePanelView: NSVisualEffectView {
 
     private func colorsMatch(_ lhs: NSColor, _ rhs: NSColor) -> Bool {
         lhs.usingColorSpace(.deviceRGB) == rhs.usingColorSpace(.deviceRGB)
+    }
+}
+
+private final class CaptureColorWell: NSColorWell {
+    override func activate(_ exclusive: Bool) {
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = true
+        panel.isContinuous = true
+        HSLColorAccessoryView.shared.attach(to: panel, color: color)
+        panel.accessoryView = HSLColorAccessoryView.shared
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        super.activate(exclusive)
+        panel.orderFrontRegardless()
+    }
+}
+
+/// AppKit's standard panel already provides RGB sliders, the color wheel and the
+/// screen eyedropper. This compact accessory adds the missing true HSL controls.
+private final class HSLColorAccessoryView: NSView {
+    static let shared = HSLColorAccessoryView()
+
+    private weak var panel: NSColorPanel?
+    private let hue = NSSlider(value: 0, minValue: 0, maxValue: 360, target: nil, action: nil)
+    private let saturation = NSSlider(value: 0, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let lightness = NSSlider(value: 0, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let hueValue = NSTextField(labelWithString: "0°")
+    private let saturationValue = NSTextField(labelWithString: "0%")
+    private let lightnessValue = NSTextField(labelWithString: "0%")
+    private var isSynchronizing = false
+
+    private init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 280, height: 112))
+        let title = NSTextField(labelWithString: "HSL")
+        title.font = .systemFont(ofSize: 12, weight: .semibold)
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        stack.addArrangedSubview(title)
+        stack.addArrangedSubview(row(label: "H", slider: hue, value: hueValue))
+        stack.addArrangedSubview(row(label: "S", slider: saturation, value: saturationValue))
+        stack.addArrangedSubview(row(label: "L", slider: lightness, value: lightnessValue))
+        for slider in [hue, saturation, lightness] {
+            slider.isContinuous = true
+            slider.target = self
+            slider.action = #selector(changeHSL)
+        }
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -6)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func row(label: String, slider: NSSlider, value: NSTextField) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        let name = NSTextField(labelWithString: label)
+        name.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+        name.alignment = .center
+        name.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        slider.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        value.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        value.alignment = .right
+        value.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        row.addArrangedSubview(name)
+        row.addArrangedSubview(slider)
+        row.addArrangedSubview(value)
+        return row
+    }
+
+    func attach(to panel: NSColorPanel, color: NSColor) {
+        self.panel = panel
+        sync(from: color)
+    }
+
+    func sync(from color: NSColor) {
+        guard !isSynchronizing,
+              let rgb = color.usingColorSpace(.deviceRGB) else { return }
+        isSynchronizing = true
+        defer { isSynchronizing = false }
+
+        let red = rgb.redComponent
+        let green = rgb.greenComponent
+        let blue = rgb.blueComponent
+        let maximum = max(red, max(green, blue))
+        let minimum = min(red, min(green, blue))
+        let delta = maximum - minimum
+        let l = (maximum + minimum) / 2
+        var h: CGFloat = 0
+        var s: CGFloat = 0
+        if delta > 0.000_001 {
+            s = delta / max(0.000_001, 1 - abs(2 * l - 1))
+            if maximum == red {
+                h = ((green - blue) / delta).truncatingRemainder(dividingBy: 6)
+            } else if maximum == green {
+                h = (blue - red) / delta + 2
+            } else {
+                h = (red - green) / delta + 4
+            }
+            h *= 60
+            if h < 0 { h += 360 }
+        }
+        hue.doubleValue = Double(h)
+        saturation.doubleValue = Double(s * 100)
+        lightness.doubleValue = Double(l * 100)
+        updateLabels()
+    }
+
+    @objc private func changeHSL() {
+        guard !isSynchronizing, let panel else { return }
+        let h = CGFloat(hue.doubleValue / 360)
+        let s = CGFloat(saturation.doubleValue / 100)
+        let l = CGFloat(lightness.doubleValue / 100)
+        let alpha = panel.color.usingColorSpace(.deviceRGB)?.alphaComponent ?? 1
+
+        let red: CGFloat
+        let green: CGFloat
+        let blue: CGFloat
+        if s <= 0.000_001 {
+            red = l; green = l; blue = l
+        } else {
+            let q = l < 0.5 ? l * (1 + s) : l + s - l * s
+            let p = 2 * l - q
+            red = Self.hueChannel(p: p, q: q, t: h + 1 / 3)
+            green = Self.hueChannel(p: p, q: q, t: h)
+            blue = Self.hueChannel(p: p, q: q, t: h - 1 / 3)
+        }
+        updateLabels()
+        panel.color = NSColor(deviceRed: red, green: green, blue: blue, alpha: alpha)
+    }
+
+    private static func hueChannel(p: CGFloat, q: CGFloat, t raw: CGFloat) -> CGFloat {
+        var t = raw
+        if t < 0 { t += 1 }
+        if t > 1 { t -= 1 }
+        if t < 1 / 6 { return p + (q - p) * 6 * t }
+        if t < 1 / 2 { return q }
+        if t < 2 / 3 { return p + (q - p) * (2 / 3 - t) * 6 }
+        return p
+    }
+
+    private func updateLabels() {
+        hueValue.stringValue = "\(Int(round(hue.doubleValue)))°"
+        saturationValue.stringValue = "\(Int(round(saturation.doubleValue)))%"
+        lightnessValue.stringValue = "\(Int(round(lightness.doubleValue)))%"
     }
 }
 

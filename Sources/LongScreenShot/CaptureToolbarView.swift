@@ -12,13 +12,17 @@ protocol CaptureToolbarDelegate: AnyObject {
     func toolbarRequestedCancel(_ toolbar: CaptureToolbarView)
     func toolbarRequestedCopy(_ toolbar: CaptureToolbarView)
     func toolbarRequestedSave(_ toolbar: CaptureToolbarView)
+    func toolbar(_ toolbar: CaptureToolbarView, requestedShortcutFor command: CaptureCommand)
 }
 
 final class CaptureToolbarView: NSVisualEffectView {
     weak var delegate: CaptureToolbarDelegate?
     private var toolButtons: [NSButton: AnnotationTool] = [:]
+    private var commandButtons: [CaptureCommand: NSButton] = [:]
+    private var buttonBaseTips: [NSButton: String] = [:]
     private var selectedButton: NSButton?
     private let stack = NSStackView()
+    private var shortcutObserver: NSObjectProtocol?
 
     init() {
         super.init(frame: .zero)
@@ -29,9 +33,17 @@ final class CaptureToolbarView: NSVisualEffectView {
         layer?.cornerRadius = 9
         layer?.masksToBounds = true
         buildButtons()
+        shortcutObserver = NotificationCenter.default.addObserver(
+            forName: .toolShortcutsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.refreshShortcutTips() }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit {
+        if let shortcutObserver { NotificationCenter.default.removeObserver(shortcutObserver) }
+    }
     override var fittingSize: NSSize { NSSize(width: stack.fittingSize.width + 18, height: 56) }
 
     private func buildButtons() {
@@ -46,25 +58,25 @@ final class CaptureToolbarView: NSVisualEffectView {
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
 
-        addTool("rectangle", L10n.tr("toolbar.rectangle"), .rectangle)
-        addTool("circle", L10n.tr("toolbar.ellipse"), .ellipse)
-        addTool("arrow.up.right", L10n.tr("toolbar.arrow"), .arrow)
-        addTool("text.tool", L10n.tr("toolbar.text"), .text)
-        addTool("curve.pen", L10n.tr("toolbar.pen"), .pen)
-        addAction("long.capture", L10n.tr("toolbar.longCapture"), #selector(longCapture))
-        addTool("mosaic.tool", L10n.tr("toolbar.mosaic"), .mosaicPixel)
-        addAction("pin.fill", L10n.tr("toolbar.pin"), #selector(pin))
-        addAction("text.viewfinder", "OCR", #selector(ocr))
-        addAction("character.bubble", L10n.tr("toolbar.translate"), #selector(translate))
+        addTool("rectangle", L10n.tr("toolbar.rectangle"), .rectangle, command: .rectangle)
+        addTool("circle", L10n.tr("toolbar.ellipse"), .ellipse, command: .ellipse)
+        addTool("arrow.up.right", L10n.tr("toolbar.arrow"), .arrow, command: .arrow)
+        addTool("text.tool", L10n.tr("toolbar.text"), .text, command: .text)
+        addTool("curve.pen", L10n.tr("toolbar.pen"), .pen, command: .pen)
+        addAction("long.capture", L10n.tr("toolbar.longCapture"), .longCapture, #selector(longCapture))
+        addTool("mosaic.tool", L10n.tr("toolbar.mosaic"), .mosaicPixel, command: .mosaic)
+        addAction("pin.fill", L10n.tr("toolbar.pin"), .pin, #selector(pin))
+        addAction("text.viewfinder", L10n.tr("toolbar.ocr"), .ocr, #selector(ocr))
+        addAction("character.bubble", L10n.tr("toolbar.translate"), .translate, #selector(translate))
         addSeparator()
-        addAction("arrow.uturn.backward", L10n.tr("toolbar.undo"), #selector(undo))
-        addAction("arrow.uturn.forward", L10n.tr("toolbar.redo"), #selector(redo))
-        addAction("xmark", L10n.tr("toolbar.cancel"), #selector(cancel))
-        addAction("checkmark", L10n.tr("toolbar.confirmCopy"), #selector(copyImage), accent: true)
-        addAction("square.and.arrow.down", L10n.tr("toolbar.save"), #selector(save))
+        addAction("arrow.uturn.backward", L10n.tr("toolbar.undo"), .undo, #selector(undo))
+        addAction("arrow.uturn.forward", L10n.tr("toolbar.redo"), .redo, #selector(redo))
+        addAction("xmark", L10n.tr("toolbar.cancel"), .cancel, #selector(cancel))
+        addAction("checkmark", L10n.tr("toolbar.confirmCopy"), .copy, #selector(copyImage), accent: true)
+        addAction("square.and.arrow.down", L10n.tr("toolbar.save"), .save, #selector(save))
     }
 
-    private func button(symbol: String, tip: String, action: Selector) -> NSButton {
+    private func button(symbol: String, tip: String, command: CaptureCommand, action: Selector) -> NSButton {
         let baseImage: NSImage?
         switch symbol {
         case "long.capture":
@@ -83,10 +95,16 @@ final class CaptureToolbarView: NSVisualEffectView {
             : baseImage?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 19, weight: .semibold))
         let button = HoverButton(image: image ?? NSImage(), target: self, action: action)
         button.isBordered = false
-        button.toolTip = tip
+        buttonBaseTips[button] = tip
+        commandButtons[command] = button
+        button.toolTip = formattedTip(tip, command: command)
         button.onHover = { [weak self, weak button] isHovering in
             guard let self else { return }
             self.delegate?.toolbar(self, hoveredDescription: isHovering ? button?.toolTip : nil)
+        }
+        button.onSecondaryClick = { [weak self] in
+            guard let self else { return }
+            self.delegate?.toolbar(self, requestedShortcutFor: command)
         }
         button.contentTintColor = .labelColor
         button.imageScaling = .scaleProportionallyDown
@@ -98,14 +116,24 @@ final class CaptureToolbarView: NSVisualEffectView {
         return button
     }
 
-    private func addTool(_ symbol: String, _ tip: String, _ tool: AnnotationTool, action: Selector = #selector(selectTool(_:))) {
-        let item = button(symbol: symbol, tip: tip, action: action)
+    private func addTool(_ symbol: String, _ tip: String, _ tool: AnnotationTool, command: CaptureCommand, action: Selector = #selector(selectTool(_:))) {
+        let item = button(symbol: symbol, tip: tip, command: command, action: action)
         toolButtons[item] = tool
     }
 
-    private func addAction(_ symbol: String, _ tip: String, _ action: Selector, accent: Bool = false) {
-        let item = button(symbol: symbol, tip: tip, action: action)
+    private func addAction(_ symbol: String, _ tip: String, _ command: CaptureCommand, _ action: Selector, accent: Bool = false) {
+        let item = button(symbol: symbol, tip: tip, command: command, action: action)
         if accent { item.contentTintColor = .controlAccentColor }
+    }
+
+    private func formattedTip(_ base: String, command: CaptureCommand) -> String {
+        "\(base)  [\(ToolShortcutStore.configuration(for: command).displayString)] · \(L10n.tr("settings.rightClickShortcut"))"
+    }
+
+    private func refreshShortcutTips() {
+        for (command, button) in commandButtons {
+            button.toolTip = formattedTip(buttonBaseTips[button] ?? command.title, command: command)
+        }
     }
 
     private func addSeparator() {
@@ -257,22 +285,22 @@ final class CaptureToolbarView: NSVisualEffectView {
 
     func selectLongCapture() {}
 
+    func perform(_ command: CaptureCommand) {
+        guard let button = commandButtons[command], button.isEnabled else { return }
+        button.performClick(nil)
+    }
+
     func setManualLongCaptureMode() {
         selectedButton?.contentTintColor = .labelColor
         (selectedButton as? HoverButton)?.isSelectedAppearance = false
         selectedButton = nil
         toolButtons.keys.forEach { $0.isEnabled = false }
-        let unavailable = Set([
-            L10n.tr("toolbar.pin"),
-            "OCR",
-            L10n.tr("toolbar.translate"),
-            L10n.tr("toolbar.undo"),
-            L10n.tr("toolbar.redo")
-        ])
-        for case let button as NSButton in stack.arrangedSubviews {
-            if let tip = button.toolTip, unavailable.contains(tip) { button.isEnabled = false }
-            if button.toolTip == L10n.tr("toolbar.longCapture") {
-                button.toolTip = L10n.tr("toolbar.finishLongCapture")
+        let unavailable: Set<CaptureCommand> = [.pin, .ocr, .translate, .undo, .redo]
+        for (command, button) in commandButtons {
+            if unavailable.contains(command) { button.isEnabled = false }
+            if command == .longCapture {
+                buttonBaseTips[button] = L10n.tr("toolbar.finishLongCapture")
+                button.toolTip = formattedTip(L10n.tr("toolbar.finishLongCapture"), command: command)
                 button.contentTintColor = .controlAccentColor
                 (button as? HoverButton)?.isSelectedAppearance = true
             }
@@ -293,6 +321,7 @@ final class CaptureToolbarView: NSVisualEffectView {
 
 final class HoverButton: NSButton {
     var onHover: ((Bool) -> Void)?
+    var onSecondaryClick: (() -> Void)?
     var isSelectedAppearance = false { didSet { updateBackground() } }
     private var isHovering = false
 
@@ -325,5 +354,9 @@ final class HoverButton: NSButton {
         isHovering = false
         updateBackground()
         onHover?(false)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onSecondaryClick?()
     }
 }

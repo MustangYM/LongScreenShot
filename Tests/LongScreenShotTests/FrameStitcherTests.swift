@@ -160,6 +160,95 @@ final class FrameStitcherTests: XCTestCase {
         XCTAssertLessThan(FrameMatcher.averageDifference(composed, expected), 4)
     }
 
+    func testVeryWideFastScrollKeepsSourceRowPrecision() throws {
+        let source = try makeFineRowPattern(width: 3_440, height: 1_700)
+        let viewportHeight = 700
+        let step = 455 // 65% of the visible height
+        let first = try XCTUnwrap(source.cropping(to: CGRect(
+            x: 0, y: 0, width: 3_440, height: viewportHeight
+        )))
+        let second = try XCTUnwrap(source.cropping(to: CGRect(
+            x: 0, y: step, width: 3_440, height: viewportHeight
+        )))
+        let third = try XCTUnwrap(source.cropping(to: CGRect(
+            x: 0, y: step * 2, width: 3_440, height: viewportHeight
+        )))
+
+        for (previous, next) in [(first, second), (second, third)] {
+            let alignment = FrameMatcher.alignment(
+                previous: previous,
+                next: next,
+                expectedNewContent: step
+            )
+            let movement = viewportHeight - alignment.nextContentStart - alignment.overlap
+            XCTAssertEqual(movement, step, accuracy: 2)
+            XCTAssertLessThan(alignment.score, 38)
+        }
+    }
+
+    func testPreviewTilesReplaceTailWithoutGapsOrVerticalFlip() throws {
+        let source = try makePattern(width: 600, height: 2_400)
+        let first = try XCTUnwrap(source.cropping(to: CGRect(
+            x: 0, y: 0, width: 600, height: 600
+        )))
+        let store = LongCapturePreviewSegmentStore(firstFrame: first, targetWidth: 120)
+        var latestTiles: [Int: LongCapturePreviewSegment] = [:]
+
+        func drain() {
+            for tile in store.drainPendingSegments() { latestTiles[tile.previewTop] = tile }
+        }
+        drain()
+
+        for top in [500, 1_000, 1_500] {
+            let frame = try XCTUnwrap(source.cropping(to: CGRect(
+                x: 0, y: top, width: 600, height: 600
+            )))
+            store.place(frame, topOffset: top, sourceStart: 100, sourceHeight: 500)
+            drain()
+        }
+        let last = try XCTUnwrap(source.cropping(to: CGRect(
+            x: 0, y: 1_800, width: 600, height: 600
+        )))
+        store.place(last, topOffset: 1_800, sourceStart: 300, sourceHeight: 300)
+        drain()
+
+        let previewHeight = store.previewContentHeight
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 120,
+            height: previewHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        for tile in latestTiles.values.sorted(by: { $0.previewTop < $1.previewTop }) {
+            context.draw(tile.image, in: CGRect(
+                x: 0,
+                y: previewHeight - tile.previewTop - tile.previewHeight,
+                width: tile.previewWidth,
+                height: tile.previewHeight
+            ))
+        }
+        let tiled = try XCTUnwrap(context.makeImage())
+        let expectedContext = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 120,
+            height: previewHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        expectedContext.interpolationQuality = .low
+        expectedContext.draw(source, in: CGRect(x: 0, y: 0, width: 120, height: previewHeight))
+        let expected = try XCTUnwrap(expectedContext.makeImage())
+        XCTAssertEqual(tiled.width, expected.width)
+        XCTAssertEqual(tiled.height, expected.height)
+        XCTAssertLessThan(FrameMatcher.averageDifference(tiled, expected), 4)
+        XCTAssertLessThanOrEqual(latestTiles.count, 2)
+    }
+
     func testSeamBacktrackAndTailReplacementPreserveExactContent() throws {
         let source = try makeTextLikePattern(width: 160, height: 420)
         let first = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0, width: 160, height: 240)))

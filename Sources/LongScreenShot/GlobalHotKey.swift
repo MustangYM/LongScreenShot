@@ -33,6 +33,150 @@ struct HotKeyConfiguration: Codable, Equatable {
         text += KeyName.name(for: UInt16(keyCode))
         return text
     }
+
+    var normalized: HotKeyConfiguration {
+        HotKeyConfiguration(
+            keyCode: keyCode,
+            carbonModifiers: carbonModifiers & UInt32(cmdKey | shiftKey | optionKey | controlKey)
+        )
+    }
+
+    func matches(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        return UInt32(event.keyCode) == keyCode
+            && GlobalHotKey.carbonFlags(from: flags) == normalized.carbonModifiers
+    }
+}
+
+enum CaptureCommand: String, CaseIterable, Codable {
+    case rectangle, ellipse, arrow, text, pen, longCapture, mosaic
+    case pin, ocr, translate
+    case undo, redo, cancel, copy, save
+
+    var title: String {
+        switch self {
+        case .rectangle: return L10n.tr("toolbar.rectangle")
+        case .ellipse: return L10n.tr("toolbar.ellipse")
+        case .arrow: return L10n.tr("toolbar.arrow")
+        case .text: return L10n.tr("toolbar.text")
+        case .pen: return L10n.tr("toolbar.pen")
+        case .longCapture: return L10n.tr("toolbar.longCapture")
+        case .mosaic: return L10n.tr("toolbar.mosaic")
+        case .pin: return L10n.tr("toolbar.pin")
+        case .ocr: return L10n.tr("toolbar.ocr")
+        case .translate: return L10n.tr("toolbar.translate")
+        case .undo: return L10n.tr("toolbar.undo")
+        case .redo: return L10n.tr("toolbar.redo")
+        case .cancel: return L10n.tr("toolbar.cancel")
+        case .copy: return L10n.tr("toolbar.confirmCopy")
+        case .save: return L10n.tr("toolbar.save")
+        }
+    }
+
+    var defaultShortcut: HotKeyConfiguration {
+        func key(_ keyCode: Int, _ modifiers: UInt32 = 0) -> HotKeyConfiguration {
+            HotKeyConfiguration(keyCode: UInt32(keyCode), carbonModifiers: modifiers)
+        }
+        switch self {
+        case .rectangle: return key(kVK_ANSI_R)
+        case .ellipse: return key(kVK_ANSI_E)
+        case .arrow: return key(kVK_ANSI_A)
+        case .text: return key(kVK_ANSI_T)
+        case .pen: return key(kVK_ANSI_P)
+        case .longCapture: return key(kVK_ANSI_L)
+        case .mosaic: return key(kVK_ANSI_M)
+        case .pin: return key(kVK_ANSI_I)
+        case .ocr: return key(kVK_ANSI_O)
+        case .translate: return key(kVK_ANSI_G)
+        case .undo: return key(kVK_ANSI_Z, UInt32(cmdKey))
+        case .redo: return key(kVK_ANSI_Z, UInt32(cmdKey | shiftKey))
+        case .cancel: return key(kVK_Escape)
+        case .copy: return key(kVK_ANSI_C, UInt32(cmdKey))
+        case .save: return key(kVK_ANSI_S, UInt32(cmdKey))
+        }
+    }
+
+    var group: Int {
+        switch self {
+        case .rectangle, .ellipse, .arrow, .text, .pen, .longCapture, .mosaic: return 0
+        case .pin, .ocr, .translate: return 1
+        case .undo, .redo, .cancel, .copy, .save: return 2
+        }
+    }
+}
+
+enum ToolShortcutStore {
+    enum AssignmentResult {
+        case saved
+        case conflict(CaptureCommand)
+        case conflictsWithGlobalCapture
+        case reserved
+    }
+
+    private static let defaultsKey = "captureCommandShortcuts.v1"
+    private static var cachedValues: [String: HotKeyConfiguration] = {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              let value = try? JSONDecoder().decode([String: HotKeyConfiguration].self, from: data) else {
+            return [:]
+        }
+        return value
+    }()
+
+    private static var stored: [String: HotKeyConfiguration] {
+        get { cachedValues }
+        set {
+            cachedValues = newValue
+            UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: defaultsKey)
+            NotificationCenter.default.post(name: .toolShortcutsDidChange, object: nil)
+        }
+    }
+
+    static func configuration(for command: CaptureCommand) -> HotKeyConfiguration {
+        (stored[command.rawValue] ?? command.defaultShortcut).normalized
+    }
+
+    @discardableResult
+    static func assign(_ configuration: HotKeyConfiguration, to command: CaptureCommand) -> AssignmentResult {
+        let value = configuration.normalized
+        let keyCode = UInt16(value.keyCode)
+        if keyCode == UInt16(kVK_Delete) || keyCode == UInt16(kVK_ForwardDelete) {
+            return .reserved
+        }
+        if keyCode == UInt16(kVK_Escape), command != .cancel { return .reserved }
+        if value == HotKeyConfiguration.current.normalized { return .conflictsWithGlobalCapture }
+        for other in CaptureCommand.allCases where other != command {
+            if ToolShortcutStore.configuration(for: other) == value { return .conflict(other) }
+        }
+        var values = stored
+        values[command.rawValue] = value
+        stored = values
+        return .saved
+    }
+
+    static func restoreDefault(for command: CaptureCommand) {
+        var values = stored
+        values.removeValue(forKey: command.rawValue)
+        stored = values
+    }
+
+    static func restoreAllDefaults() {
+        cachedValues.removeAll(keepingCapacity: false)
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        NotificationCenter.default.post(name: .toolShortcutsDidChange, object: nil)
+    }
+
+    static func command(matching event: NSEvent) -> CaptureCommand? {
+        CaptureCommand.allCases.first { configuration(for: $0).matches(event) }
+    }
+
+    static func conflictingCommand(for configuration: HotKeyConfiguration) -> CaptureCommand? {
+        let value = configuration.normalized
+        return CaptureCommand.allCases.first { self.configuration(for: $0) == value }
+    }
+}
+
+extension Notification.Name {
+    static let toolShortcutsDidChange = Notification.Name("LongScreenShot.toolShortcutsDidChange")
 }
 
 final class GlobalHotKey {
@@ -111,7 +255,12 @@ enum KeyName {
             UInt16(kVK_ANSI_0): "0", UInt16(kVK_ANSI_1): "1", UInt16(kVK_ANSI_2): "2",
             UInt16(kVK_ANSI_3): "3", UInt16(kVK_ANSI_4): "4", UInt16(kVK_ANSI_5): "5",
             UInt16(kVK_ANSI_6): "6", UInt16(kVK_ANSI_7): "7", UInt16(kVK_ANSI_8): "8",
-            UInt16(kVK_ANSI_9): "9", UInt16(kVK_Space): "Space"
+            UInt16(kVK_ANSI_9): "9", UInt16(kVK_Space): "Space",
+            UInt16(kVK_Return): "↩", UInt16(kVK_ANSI_KeypadEnter): "⌤",
+            UInt16(kVK_Escape): "Esc", UInt16(kVK_Delete): "⌫",
+            UInt16(kVK_ForwardDelete): "⌦", UInt16(kVK_Tab): "⇥",
+            UInt16(kVK_LeftArrow): "←", UInt16(kVK_RightArrow): "→",
+            UInt16(kVK_UpArrow): "↑", UInt16(kVK_DownArrow): "↓"
         ]
         return map[code] ?? "Key\(code)"
     }
