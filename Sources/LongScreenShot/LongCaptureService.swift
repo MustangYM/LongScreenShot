@@ -1029,7 +1029,10 @@ final class LongCapturePreviewSegmentStore {
         guard height > 0 else { return }
 
         let previewTop = max(0, Int(round(CGFloat(sourceTopOffset + start) * sourceToPreviewScale)))
-        let requestedPreviewHeight = max(1, Int(round(CGFloat(height) * sourceToPreviewScale)))
+        // Round shared document boundaries, not each strip's height independently.
+        // round(start) + round(height) can leave a transparent row before the next strip.
+        let previewBottom = Int(round(CGFloat(sourceTopOffset + start + height) * sourceToPreviewScale))
+        let requestedPreviewHeight = max(1, previewBottom - previewTop)
 
         guard let image = makePreviewImage(
             from: frame,
@@ -1153,7 +1156,8 @@ final class LongCapturePreviewSegmentStore {
                 width: preparedPreviewFrame.width,
                 height: croppedHeight
                )) {
-                return cropped
+                if cropped.height == previewHeight { return cropped }
+                return FrameStitcher.resizedCopy(cropped, width: targetWidth, height: previewHeight)
             }
         }
 

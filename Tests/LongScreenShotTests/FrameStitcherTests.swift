@@ -3,6 +3,40 @@ import XCTest
 @testable import LongScreenShot
 
 final class FrameStitcherTests: XCTestCase {
+    func testFractionalPreviewStripsNeverLeaveTransparentRows() throws {
+        let width = 301, height = 113, previewWidth = 31
+        let source = try XCTUnwrap(CGContext(data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        source.setFillColor(gray: 1, alpha: 1)
+        source.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(source.makeImage())
+        for prepared in [false, true] {
+            let store = LongCapturePreviewSegmentStore(firstFrame: image, targetWidth: previewWidth)
+            var tiles: [Int: LongCapturePreviewSegment] = [:]
+            for segment in store.drainPendingSegments() { tiles[segment.previewTop] = segment }
+            let small = prepared ? FrameStitcher.resizedCopy(image, width: previewWidth, height: 12) : nil
+            for top in stride(from: 11, through: 5005, by: 11) {
+                store.place(image, topOffset: top, sourceStart: height - 11, sourceHeight: 11,
+                            preparedPreviewFrame: small)
+                for segment in store.drainPendingSegments() { tiles[segment.previewTop] = segment }
+            }
+            let previewHeight = store.previewContentHeight
+            let output = try XCTUnwrap(CGContext(data: nil, width: previewWidth, height: previewHeight,
+                bitsPerComponent: 8, bytesPerRow: previewWidth * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue))
+            for tile in tiles.values {
+                output.draw(tile.image, in: CGRect(x: 0, y: previewHeight - tile.previewTop - tile.previewHeight,
+                    width: previewWidth, height: tile.previewHeight))
+            }
+            let bytes = try XCTUnwrap(output.data).assumingMemoryBound(to: UInt8.self)
+            for row in 0..<previewHeight {
+                XCTAssertEqual(bytes[row * output.bytesPerRow + 15 * 4 + 3], 255,
+                               "Transparent preview seam at row \(row), prepared=\(prepared)")
+            }
+        }
+    }
+
     func testDuplicateDetection() throws {
         let image = try makePattern(width: 120, height: 220)
         XCTAssertLessThan(FrameMatcher.averageDifference(image, image), 0.01)

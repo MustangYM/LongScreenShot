@@ -3,6 +3,20 @@ import XCTest
 @testable import LongScreenShot
 
 final class CaptureLifecycleTests: XCTestCase {
+    func testLongCaptureReturnAndKeypadEnterUseUnmodifiedKeysOnly() throws {
+        func key(_ code: UInt16, flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: 0, windowNumber: 0, context: nil, characters: "\r",
+                charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: code))
+        }
+        XCTAssertTrue(LongCaptureKeyboard.isConfirm(try key(36)))
+        XCTAssertTrue(LongCaptureKeyboard.isConfirm(try key(76, flags: .numericPad)))
+        for modifiers: NSEvent.ModifierFlags in [.command, .shift, .option, .control] {
+            XCTAssertFalse(LongCaptureKeyboard.isConfirm(try key(36, flags: modifiers)))
+        }
+        XCTAssertFalse(LongCaptureKeyboard.isConfirm(try key(53)))
+    }
+
     func testForeignMenuCannotPresentOverlayBeforeActivation() {
         var session = CaptureSessionLifecycle()
         XCTAssertTrue(session.begin())

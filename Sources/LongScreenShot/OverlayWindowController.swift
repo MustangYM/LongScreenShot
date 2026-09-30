@@ -1,6 +1,13 @@
 import AppKit
 import Carbon
 
+enum LongCaptureKeyboard {
+    static func isConfirm(_ event: NSEvent) -> Bool {
+        (event.keyCode == UInt16(kVK_Return) || event.keyCode == UInt16(kVK_ANSI_KeypadEnter))
+            && event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty
+    }
+}
+
 enum CaptureWindowLevels {
     // Cover captured menus without using the screen-saver/security window tier.
     static let overlay = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
@@ -30,12 +37,14 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     private let startsInLongMode: Bool
     private var longCaptureService: LongCaptureService?
     private var longCaptureToolbarController: LongCaptureToolbarController?
+    private var longCaptureFinishHotKeys: [GlobalHotKey] = []
     private var manualLongCaptureFinishing = false
     private var cursorPushed = false
     private var closed = false
     var allowsInactiveCapture: Bool { longCaptureService != nil }
 
     func releaseInput() {
+        longCaptureFinishHotKeys.removeAll()
         window?.ignoresMouseEvents = true
         window?.orderOut(nil)
         longCaptureToolbarController?.window?.ignoresMouseEvents = true
@@ -101,6 +110,7 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
         // Remove the input-blocking windows before any cancellation/cache cleanup.
         releaseInput()
         (window as? CaptureOverlayWindow)?.onCancel = nil
+        longCaptureFinishHotKeys.removeAll()
         longCaptureService?.cancel()
         longCaptureService = nil
         (window?.contentView as? CaptureOverlayView)?.prepareForClose()
@@ -161,6 +171,13 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
         service.onStatus = { [weak view] text, isError in
             view?.setManualLongCaptureStatus(text, isError: isError)
         }
+        // The browser owns keyboard focus during scrolling. Reserve Return only
+        // for this long-capture session, so it finishes instead of reaching the page.
+        longCaptureFinishHotKeys = [kVK_Return, kVK_ANSI_KeypadEnter].compactMap { code in
+            GlobalHotKey(configuration: HotKeyConfiguration(keyCode: UInt32(code), carbonModifiers: 0)) { [weak self] in
+                self?.finishManualLongCapture(saveAfter: false)
+            }
+        }
         service.start()
         NSApp.deactivate()
     }
@@ -174,13 +191,14 @@ final class OverlayWindowController: NSWindowController, CaptureOverlayViewDeleg
     }
 
     private func finishManualLongCapture(saveAfter: Bool) {
-        guard !manualLongCaptureFinishing else { return }
+        guard longCaptureService != nil, !manualLongCaptureFinishing else { return }
         manualLongCaptureFinishing = true
         (window?.contentView as? CaptureOverlayView)?.setManualLongCaptureStatus(L10n.tr("long.finishing"), isError: false)
         longCaptureService?.finish { [weak self] result in
             guard let self else { return }
             switch result {
             case let .success(image):
+                self.longCaptureFinishHotKeys.removeAll()
                 self.longCaptureService = nil
                 self.longCaptureToolbarController?.close()
                 self.longCaptureToolbarController = nil
@@ -388,6 +406,10 @@ final class CaptureOverlayView: NSView, CaptureToolbarDelegate, NSTextFieldDeleg
     }
 
     private func handleKeyDownFromActiveOwner(_ event: NSEvent) {
+        if manualLongCaptureActive, LongCaptureKeyboard.isConfirm(event) {
+            delegate?.overlayRequestedFinishLongCapture(self, saveAfter: false)
+            return
+        }
         if event.keyCode == 53 { delegate?.overlayDidCancel(self); return }
         if event.keyCode == UInt16(kVK_Delete) || event.keyCode == UInt16(kVK_ForwardDelete) {
             FeedbackToast.show(
