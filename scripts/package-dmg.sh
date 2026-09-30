@@ -1,5 +1,5 @@
-#!/bin/zsh
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # =========================
 # 基础配置
@@ -43,18 +43,20 @@ mkdir -p "$BUILD_DIR"
 # SwiftPM 编译
 # =========================
 
-SWIFT_ARGS=()
-if [[ "${LONGSCREENSHOT_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
-  SWIFT_ARGS+=(--disable-sandbox)
+# Positional arguments work in sh, bash and zsh, including with set -u.
+# Always include the base command so there is no empty-array expansion.
+set -- build -c "$CONFIGURATION"
+if [ "${LONGSCREENSHOT_DISABLE_SWIFTPM_SANDBOX:-0}" = "1" ]; then
+  set -- "$@" --disable-sandbox
 fi
 
 echo "==> swift build"
-swift build -c "$CONFIGURATION" "${SWIFT_ARGS[@]}"
+swift "$@"
 
-BIN_PATH="$(swift build -c "$CONFIGURATION" "${SWIFT_ARGS[@]}" --show-bin-path)"
+BIN_PATH="$(swift "$@" --show-bin-path)"
 BIN="$BIN_PATH/$EXECUTABLE_NAME"
 
-if [[ ! -f "$BIN" ]]; then
+if [ ! -f "$BIN" ]; then
   echo "ERROR: executable not found: $BIN"
   exit 1
 fi
@@ -72,7 +74,7 @@ mkdir -p "$APP/Contents/Resources"
 ditto "$BIN" "$APP/Contents/MacOS/$EXECUTABLE_NAME"
 chmod +x "$APP/Contents/MacOS/$EXECUTABLE_NAME"
 
-if [[ ! -f "$INFO_PLIST_SOURCE" ]]; then
+if [ ! -f "$INFO_PLIST_SOURCE" ]; then
   echo "ERROR: Info.plist not found: $INFO_PLIST_SOURCE"
   exit 1
 fi
@@ -87,7 +89,7 @@ cp "$INFO_PLIST_SOURCE" "$APP/Contents/Info.plist"
 # 编译 Assets.xcassets
 # =========================
 
-if [[ -d "$ASSET_CATALOG" ]]; then
+if [ -d "$ASSET_CATALOG" ]; then
   echo "==> Compile asset catalog"
 
   rm -f "$ASSET_INFO"
@@ -100,23 +102,23 @@ if [[ -d "$ASSET_CATALOG" ]]; then
     --app-icon AppIcon \
     --output-partial-info-plist "$ASSET_INFO" >/dev/null
 
-  if [[ -f "$ASSET_INFO" ]]; then
+  if [ -f "$ASSET_INFO" ]; then
     /usr/libexec/PlistBuddy -c "Delete :CFBundleIconFile" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
     /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
 
     ICON_FILE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$ASSET_INFO" 2>/dev/null || true)
     ICON_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$ASSET_INFO" 2>/dev/null || true)
 
-    if [[ -n "$ICON_FILE" ]]; then
+    if [ -n "$ICON_FILE" ]; then
       /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string $ICON_FILE" "$APP/Contents/Info.plist"
     fi
 
-    if [[ -n "$ICON_NAME" ]]; then
+    if [ -n "$ICON_NAME" ]; then
       /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string $ICON_NAME" "$APP/Contents/Info.plist"
     fi
   fi
 
-  if [[ ! -f "$APP/Contents/Resources/Assets.car" ]]; then
+  if [ ! -f "$APP/Contents/Resources/Assets.car" ]; then
     echo "ERROR: Assets.car not generated"
     exit 1
   fi
@@ -141,7 +143,7 @@ fi
 
 echo "==> Code sign app"
 
-if [[ -n "$DEVELOPER_ID_APP" ]]; then
+if [ -n "$DEVELOPER_ID_APP" ]; then
   echo "==> Using Developer ID identity: $DEVELOPER_ID_APP"
 
   codesign \
@@ -184,7 +186,7 @@ ditto "$APP" "$DMG_ROOT/$APP_NAME.app"
 ln -s /Applications "$DMG_ROOT/Applications"
 
 # 检查 DMG 里的 app 是否真的带资源
-if [[ ! -f "$DMG_ROOT/$APP_NAME.app/Contents/Resources/Assets.car" ]]; then
+if [ ! -f "$DMG_ROOT/$APP_NAME.app/Contents/Resources/Assets.car" ]; then
   echo "ERROR: Assets.car missing in DMG app"
   exit 1
 fi
@@ -209,7 +211,7 @@ hdiutil create \
 # 签名 DMG
 # =========================
 
-if [[ -n "$DEVELOPER_ID_APP" ]]; then
+if [ -n "$DEVELOPER_ID_APP" ]; then
   echo "==> Code sign DMG"
 
   codesign \
@@ -225,7 +227,7 @@ fi
 # 可选：公证 DMG
 # =========================
 
-if [[ -n "$DEVELOPER_ID_APP" && -n "$NOTARY_PROFILE" ]]; then
+if [ -n "$DEVELOPER_ID_APP" ] && [ -n "$NOTARY_PROFILE" ]; then
   echo "==> Submit DMG to Apple notarization"
 
   xcrun notarytool submit "$DMG" \
