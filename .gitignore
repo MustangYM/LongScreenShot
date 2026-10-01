@@ -2,6 +2,8 @@
 .DS_Store
 
 # SwiftPM / build artifacts
+.log
+.md
 .build/
 build/
 .swiftpm/
